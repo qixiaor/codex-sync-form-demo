@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
 
@@ -33,9 +34,12 @@ def sync_once(db_path: str | Path, config_path: str | Path) -> dict[str, int]:
 
 def sync_loop(db_path: str | Path, config_path: str | Path, interval_seconds: int) -> None:
     while True:
-        result = sync_once(db_path, config_path)
-        print(
-            f"sync completed: imported={result['imported']} "
-            f"updated={result['updated']} config={config_path}"
-        )
+        try:
+            result = sync_once(db_path, config_path)
+            print(
+                f"sync completed: imported={result['imported']} "
+                f"updated={result['updated']} config={config_path}"
+            )
+        except Exception as exc:
+            print(f"sync failed: config={config_path} error={exc}", file=sys.stderr)
         time.sleep(interval_seconds)

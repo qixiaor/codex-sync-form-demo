@@ -139,11 +139,39 @@ python -m codex_orchestrator pool `
 
 示例文件：[`examples/google-sheets.sync.json`](f:/work/codexSyncDemo/examples/google-sheets.sync.json)
 
+推荐使用 `service_account_file`，因为它可以同时完成读取和状态回写。
+
 需要提供：
 
-- `spreadsheet_id`
+- `spreadsheet_url` 或 `spreadsheet_id`
 - `sheet_name`
-- `access_token` 或 `access_token_env`
+- `service_account_file`
+
+安装依赖：
+
+```powershell
+python -m pip install google-auth
+```
+
+1. 在 Google Cloud 创建一个 service account，并下载 JSON 密钥文件。
+2. 把这个 service account 的邮箱加入你的 Google Sheet 共享成员，至少给编辑权限。
+3. 把共享链接填到 `spreadsheet_url`。
+4. 把 JSON 文件路径填到 `service_account_file`。
+5. 运行 `sync once` 或 `sync loop`。
+
+如果你的共享链接是：
+
+```text
+https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit?gid=0#gid=0
+```
+
+程序会自动提取：
+
+```text
+1AbCdEfGhIjKlMnOpQrStUvWxYz
+```
+
+所以通常不需要手工找 `spreadsheet_id`。
 
 Google Sheets provider 约定：
 
@@ -151,7 +179,7 @@ Google Sheets provider 约定：
 - B列：任务详情
 - C列：状态
 - 第 1 行默认是表头
-- 实际回写时会直接更新对应行的 C 列状态
+- 程序会回写对应行的 C 列状态
 
 ### Generic JSON
 

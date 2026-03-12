@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib import parse, request
+from urllib import error, parse, request
 
 from . import STATUS_PENDING, VALID_STATUSES
 
@@ -61,18 +61,27 @@ class SyncProvider:
 class GoogleSheetsProvider(SyncProvider):
     def __init__(self, config: ProviderConfig) -> None:
         super().__init__(config)
-        self.spreadsheet_id = _required(config.options, "spreadsheet_id")
+        self.spreadsheet_id = _resolve_spreadsheet_id(config.options)
         self.sheet_name = str(config.options.get("sheet_name", "Sheet1"))
         self.header_row = int(config.options.get("header_row", 1))
+        self.api_key = _resolve_api_key(config.options)
         self.access_token = _resolve_access_token(config.options)
         self.timeout_seconds = int(config.options.get("timeout_seconds", 30))
         self.read_range = str(config.options.get("read_range", f"{_quote_sheet_name(self.sheet_name)}!A:C"))
         self.status_column = str(config.options.get("status_column", "C"))
 
+    @property
+    def can_write(self) -> bool:
+        return bool(self.access_token)
+
     def list_tasks(self) -> list[SourceTask]:
+        params = {}
+        if self.api_key:
+            params["key"] = self.api_key
         payload = self._request_json(
             "GET",
             f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}/values/{parse.quote(self.read_range, safe='')}",
+            params=params,
         )
         rows = payload.get("values", [])
         tasks: list[SourceTask] = []
@@ -91,6 +100,8 @@ class GoogleSheetsProvider(SyncProvider):
     def update_status(self, source_task_key: str, status: str) -> None:
         if status not in VALID_STATUSES:
             raise ValueError(f"invalid status: {status}")
+        if not self.access_token:
+            raise RuntimeError("google-sheets writeback requires access_token or service_account_file")
         row_number = int(source_task_key)
         cell_range = f"{_quote_sheet_name(self.sheet_name)}!{self.status_column}{row_number}:{self.status_column}{row_number}"
         body = {"range": cell_range, "majorDimension": "ROWS", "values": [[status]]}
@@ -100,15 +111,31 @@ class GoogleSheetsProvider(SyncProvider):
             body,
         )
 
-    def _request_json(self, method: str, url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        headers = {"Authorization": f"Bearer {self.access_token}"}
+    def _request_json(
+        self,
+        method: str,
+        url: str,
+        body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        headers: dict[str, str] = {}
+        if self.access_token:
+            headers["Authorization"] = f"Bearer {self.access_token}"
         data = None
         if body is not None:
             headers["Content-Type"] = "application/json; charset=utf-8"
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        if params:
+            query = parse.urlencode(params)
+            joiner = "&" if "?" in url else "?"
+            url = f"{url}{joiner}{query}"
         req = request.Request(url, data=data, method=method, headers=headers)
-        with request.urlopen(req, timeout=self.timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"google-sheets {method} {url} failed: {exc.code} {body}") from exc
 
 
 class GenericJsonProvider(SyncProvider):
@@ -165,9 +192,13 @@ class GenericJsonProvider(SyncProvider):
             headers["Content-Type"] = "application/json; charset=utf-8"
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         req = request.Request(url, data=data, method=method, headers=headers)
-        with request.urlopen(req, timeout=self.timeout_seconds) as response:
-            raw = response.read().decode("utf-8")
-            return json.loads(raw) if raw.strip() else {}
+        try:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw) if raw.strip() else {}
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"generic-json {method} {url} failed: {exc.code} {body}") from exc
 
 
 def _required(payload: dict[str, Any], key: str) -> str:
@@ -185,12 +216,73 @@ def _resolve_access_token(options: dict[str, Any]) -> str:
     value = os.environ.get(env_name, "").strip()
     if value:
         return value
-    raise ValueError("google-sheets provider requires access_token or access_token_env")
+    service_account_file = str(options.get("service_account_file", "")).strip()
+    if service_account_file:
+        return _build_service_account_token(
+            service_account_file=service_account_file,
+            scopes=options.get(
+                "scopes",
+                ["https://www.googleapis.com/auth/spreadsheets"],
+            ),
+            subject=str(options.get("service_account_subject", "")).strip() or None,
+        )
+    return ""
+
+
+def _resolve_api_key(options: dict[str, Any]) -> str:
+    direct = str(options.get("api_key", "")).strip()
+    if direct:
+        return direct
+    env_name = str(options.get("api_key_env", "GOOGLE_API_KEY")).strip()
+    value = os.environ.get(env_name, "").strip()
+    if value:
+        return value
+    return ""
 
 
 def _quote_sheet_name(sheet_name: str) -> str:
     escaped = sheet_name.replace("'", "''")
     return f"'{escaped}'"
+
+
+def _resolve_spreadsheet_id(options: dict[str, Any]) -> str:
+    spreadsheet_id = str(options.get("spreadsheet_id", "")).strip()
+    if spreadsheet_id:
+        return spreadsheet_id
+    spreadsheet_url = str(options.get("spreadsheet_url", "")).strip()
+    if spreadsheet_url:
+        match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", spreadsheet_url)
+        if match:
+            return match.group(1)
+        raise ValueError("cannot extract spreadsheet_id from spreadsheet_url")
+    raise ValueError("google-sheets provider requires spreadsheet_id or spreadsheet_url")
+
+
+def _build_service_account_token(
+    service_account_file: str,
+    scopes: list[str] | tuple[str, ...] | Any,
+    subject: str | None,
+) -> str:
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2 import service_account
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "google-auth is required for service_account_file support. "
+            "Install it with: python -m pip install google-auth"
+        ) from exc
+
+    credentials = service_account.Credentials.from_service_account_file(
+        service_account_file,
+        scopes=list(scopes),
+    )
+    if subject:
+        credentials = credentials.with_subject(subject)
+    credentials.refresh(Request())
+    token = credentials.token or ""
+    if not token:
+        raise RuntimeError("failed to obtain access token from service account")
+    return token
 
 
 def _extract_path(payload: Any, path: str) -> Any:

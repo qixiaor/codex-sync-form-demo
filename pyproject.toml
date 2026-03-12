@@ -7,3 +7,6 @@ name = "codex-task-orchestrator"
 version = "0.1.0"
 description = "Run fresh Codex CLI workers against an online task queue."
 requires-python = ">=3.10"
+
+[project.optional-dependencies]
+google = ["google-auth>=2.0"]

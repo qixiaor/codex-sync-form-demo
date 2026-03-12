@@ -5,7 +5,12 @@ from pathlib import Path
 from unittest import mock
 
 from codex_orchestrator.store import TaskStore
-from codex_orchestrator.sync_providers import SourceTask
+from codex_orchestrator.sync_providers import (
+    GoogleSheetsProvider,
+    ProviderConfig,
+    SourceTask,
+    _resolve_spreadsheet_id,
+)
 from codex_orchestrator.sync_service import sync_once
 from codex_orchestrator.worker import (
     WorkerConfig,
@@ -214,6 +219,74 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(2, len(tasks))
             provider.update_status.assert_any_call("2", "未开始")
             provider.update_status.assert_any_call("3", "未开始")
+
+    def test_resolve_spreadsheet_id_from_share_url(self) -> None:
+        spreadsheet_id = _resolve_spreadsheet_id(
+            {
+                "spreadsheet_url": "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit?gid=0#gid=0"
+            }
+        )
+        self.assertEqual("1AbCdEfGhIjKlMnOpQrStUvWxYz", spreadsheet_id)
+
+    def test_google_provider_accepts_spreadsheet_url_with_direct_token(self) -> None:
+        provider = GoogleSheetsProvider(
+            ProviderConfig(
+                provider="google-sheets",
+                name="sheet-demo",
+                options={
+                    "spreadsheet_url": "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit#gid=0",
+                    "sheet_name": "Sheet1",
+                    "access_token": "token",
+                },
+            )
+        )
+        self.assertEqual("1AbCdEfGhIjKlMnOpQrStUvWxYz", provider.spreadsheet_id)
+        self.assertTrue(provider.can_write)
+
+    def test_google_provider_accepts_api_key_only_as_read_only(self) -> None:
+        provider = GoogleSheetsProvider(
+            ProviderConfig(
+                provider="google-sheets",
+                name="sheet-demo",
+                options={
+                    "spreadsheet_url": "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit#gid=0",
+                    "sheet_name": "Sheet1",
+                    "api_key": "api-key",
+                },
+            )
+        )
+        self.assertEqual("api-key", provider.api_key)
+        self.assertFalse(provider.can_write)
+
+    def test_google_provider_uses_service_account_file(self) -> None:
+        with mock.patch(
+            "codex_orchestrator.sync_providers._build_service_account_token",
+            return_value="service-token",
+        ) as token_builder:
+            provider = GoogleSheetsProvider(
+                ProviderConfig(
+                    provider="google-sheets",
+                    name="sheet-demo",
+                    options={
+                        "spreadsheet_id": "sheet-id",
+                        "sheet_name": "Sheet1",
+                        "service_account_file": "service-account.json",
+                    },
+                )
+            )
+        self.assertEqual("service-token", provider.access_token)
+        token_builder.assert_called_once()
+        self.assertTrue(provider.can_write)
+
+    def test_sync_loop_keeps_running_after_failure(self) -> None:
+        from codex_orchestrator import sync_service
+
+        with mock.patch("codex_orchestrator.sync_service.sync_once", side_effect=RuntimeError("boom")), mock.patch(
+            "codex_orchestrator.sync_service.time.sleep",
+            side_effect=KeyboardInterrupt,
+        ), mock.patch("sys.stderr"):
+            with self.assertRaises(KeyboardInterrupt):
+                sync_service.sync_loop("tasks.db", "provider.json", 1)
 
 
 if __name__ == "__main__":

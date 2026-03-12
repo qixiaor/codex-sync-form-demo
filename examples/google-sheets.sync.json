@@ -1,11 +1,11 @@
 {
   "provider": "google-sheets",
   "name": "google-sheet-demo",
-  "spreadsheet_id": "YOUR_SPREADSHEET_ID",
+  "spreadsheet_url": "https://docs.google.com/spreadsheets/d/1yqguewQ3a645H7qbt-3OSZgFxIKvuQMBOzvsfYfNV8M/edit?gid=0#gid=0",
   "sheet_name": "Sheet1",
   "header_row": 1,
   "read_range": "'Sheet1'!A:C",
   "status_column": "C",
-  "access_token_env": "GOOGLE_ACCESS_TOKEN",
+  "service_account_file": "C:/Users/17012/Desktop/common/codex-sync-form-demo-bd5e116f42d7.json",
   "timeout_seconds": 30
 }
