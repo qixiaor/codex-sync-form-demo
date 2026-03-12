@@ -15,7 +15,10 @@ def run_pool(
     codex_model: str | None,
     lease_seconds: int,
     poll_interval: int,
+    server_timeout_seconds: int,
     codex_timeout_seconds: int,
+    proxy_url: str | None,
+    auto_proxy: bool,
     codex_extra_args: list[str],
 ) -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -31,7 +34,10 @@ def run_pool(
                 codex_model=codex_model,
                 lease_seconds=lease_seconds,
                 poll_interval=poll_interval,
+                server_timeout_seconds=server_timeout_seconds,
                 codex_timeout_seconds=codex_timeout_seconds,
+                proxy_url=proxy_url,
+                auto_proxy=auto_proxy,
                 codex_extra_args=codex_extra_args,
             )
 
@@ -51,7 +57,10 @@ def run_pool(
                     codex_model=codex_model,
                     lease_seconds=lease_seconds,
                     poll_interval=poll_interval,
+                    server_timeout_seconds=server_timeout_seconds,
                     codex_timeout_seconds=codex_timeout_seconds,
+                    proxy_url=proxy_url,
+                    auto_proxy=auto_proxy,
                     codex_extra_args=codex_extra_args,
                 )
     except KeyboardInterrupt:
@@ -76,7 +85,10 @@ def _spawn_worker(
     codex_model: str | None,
     lease_seconds: int,
     poll_interval: int,
+    server_timeout_seconds: int,
     codex_timeout_seconds: int,
+    proxy_url: str | None,
+    auto_proxy: bool,
     codex_extra_args: list[str],
 ) -> subprocess.Popen[str]:
     worker_runtime = runtime_dir / f"worker-{index}"
@@ -98,6 +110,8 @@ def _spawn_worker(
         str(lease_seconds),
         "--poll-interval",
         str(poll_interval),
+        "--server-timeout-seconds",
+        str(server_timeout_seconds),
         "--codex-timeout-seconds",
         str(codex_timeout_seconds),
         "--codex-bin",
@@ -105,6 +119,10 @@ def _spawn_worker(
     ]
     if codex_model:
         command.extend(["--codex-model", codex_model])
+    if proxy_url:
+        command.extend(["--proxy-url", proxy_url])
+    if not auto_proxy:
+        command.append("--disable-auto-proxy")
     for arg in codex_extra_args:
         command.extend(["--codex-arg", arg])
     return subprocess.Popen(command, text=True)

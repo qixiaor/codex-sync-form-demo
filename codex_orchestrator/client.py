@@ -6,8 +6,9 @@ from urllib import error, request
 
 
 class TaskClient:
-    def __init__(self, server_url: str) -> None:
+    def __init__(self, server_url: str, timeout_seconds: int = 30) -> None:
         self.server_url = server_url.rstrip("/")
+        self.timeout_seconds = timeout_seconds
 
     def list_tasks(self) -> list[dict[str, Any]]:
         payload = self._request("GET", "/api/tasks")
@@ -53,7 +54,7 @@ class TaskClient:
             headers["Content-Type"] = "application/json; charset=utf-8"
         req = request.Request(f"{self.server_url}{path}", data=data, method=method, headers=headers)
         try:
-            with request.urlopen(req, timeout=30) as response:
+            with request.urlopen(req, timeout=self.timeout_seconds) as response:
                 return json.loads(response.read().decode("utf-8"))
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

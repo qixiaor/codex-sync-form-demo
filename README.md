@@ -60,6 +60,7 @@ python -m codex_orchestrator pool `
   --workers 3 `
   --template-dir . `
   --runtime-dir .codex-runtime `
+  --server-timeout-seconds 10 `
   --codex-timeout-seconds 900
 ```
 
@@ -80,6 +81,17 @@ python -m codex_orchestrator pool `
   --template-dir . `
   --runtime-dir .codex-runtime `
   --codex-bin codex.cmd
+```
+
+如果本机开着本地代理，worker 会自动探测 `http://127.0.0.1:7890` 并只对 `codex exec` 注入 `HTTP_PROXY / HTTPS_PROXY / ALL_PROXY`。也可以手动指定：
+
+```powershell
+python -m codex_orchestrator pool `
+  --server-url http://127.0.0.1:8000 `
+  --workers 3 `
+  --template-dir . `
+  --runtime-dir .codex-runtime `
+  --proxy-url http://127.0.0.1:7890
 ```
 
 ## 目录说明

@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from codex_orchestrator.store import TaskStore
-from codex_orchestrator.worker import copy_template, resolve_codex_launcher
+from codex_orchestrator.worker import WorkerConfig, build_codex_env, copy_template, resolve_codex_launcher
 
 
 class TaskStoreTests(unittest.TestCase):
@@ -93,6 +93,30 @@ class TaskStoreTests(unittest.TestCase):
                 ],
                 resolve_codex_launcher("codex"),
             )
+
+    def test_build_codex_env_uses_explicit_proxy(self) -> None:
+        config = WorkerConfig(
+            server_url="http://127.0.0.1:8000",
+            worker_id="worker-0",
+            template_dir=Path("."),
+            runtime_dir=Path(".codex-runtime"),
+            proxy_url="http://127.0.0.1:7890",
+            auto_proxy=False,
+        )
+        env = build_codex_env(config)
+        self.assertEqual("http://127.0.0.1:7890", env["HTTP_PROXY"])
+        self.assertEqual("127.0.0.1,localhost,::1", env["NO_PROXY"])
+
+    def test_build_codex_env_auto_detects_local_proxy(self) -> None:
+        config = WorkerConfig(
+            server_url="http://127.0.0.1:8000",
+            worker_id="worker-0",
+            template_dir=Path("."),
+            runtime_dir=Path(".codex-runtime"),
+        )
+        with mock.patch("codex_orchestrator.worker.is_proxy_reachable", return_value=True):
+            env = build_codex_env(config)
+        self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
 
 
 if __name__ == "__main__":

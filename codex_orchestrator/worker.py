@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -23,13 +25,17 @@ class WorkerConfig:
     codex_model: str | None = None
     lease_seconds: int = 180
     poll_interval: int = 5
+    server_timeout_seconds: int = 10
     codex_timeout_seconds: int = 900
+    proxy_url: str | None = None
+    auto_proxy: bool = True
     codex_extra_args: list[str] = field(default_factory=list)
 
 
 def run_worker(config: WorkerConfig) -> None:
-    client = TaskClient(config.server_url)
+    client = TaskClient(config.server_url, timeout_seconds=config.server_timeout_seconds)
     config.runtime_dir.mkdir(parents=True, exist_ok=True)
+    idle_polls = 0
     while True:
         try:
             task = client.claim(config.worker_id, config.lease_seconds)
@@ -38,8 +44,12 @@ def run_worker(config: WorkerConfig) -> None:
             time.sleep(config.poll_interval)
             continue
         if task is None:
+            idle_polls += 1
+            if idle_polls == 1 or idle_polls % max(1, 30 // max(1, config.poll_interval)) == 0:
+                print(f"[{config.worker_id}] waiting for pending task")
             time.sleep(config.poll_interval)
             continue
+        idle_polls = 0
         process_task(client, config, task)
 
 
@@ -116,6 +126,42 @@ def build_prompt(task: dict[str, object]) -> str:
     )
 
 
+def is_proxy_reachable(proxy_url: str) -> bool:
+    if not proxy_url.startswith("http://"):
+        return False
+    host_port = proxy_url.removeprefix("http://").split("/", 1)[0]
+    host, _, port_text = host_port.partition(":")
+    if not host or not port_text:
+        return False
+    try:
+        with socket.create_connection((host, int(port_text)), timeout=0.3):
+            return True
+    except OSError:
+        return False
+
+
+def build_codex_env(config: WorkerConfig) -> dict[str, str]:
+    env = os.environ.copy()
+    proxy_url = config.proxy_url
+    if not proxy_url and config.auto_proxy:
+        default_proxy = "http://127.0.0.1:7890"
+        if is_proxy_reachable(default_proxy):
+            proxy_url = default_proxy
+
+    if not proxy_url:
+        return env
+
+    env["HTTP_PROXY"] = proxy_url
+    env["HTTPS_PROXY"] = proxy_url
+    env["ALL_PROXY"] = proxy_url
+    env["http_proxy"] = proxy_url
+    env["https_proxy"] = proxy_url
+    env["all_proxy"] = proxy_url
+    env["NO_PROXY"] = "127.0.0.1,localhost,::1"
+    env["no_proxy"] = "127.0.0.1,localhost,::1"
+    return env
+
+
 def resolve_codex_launcher(codex_bin: str) -> list[str]:
     candidate = Path(codex_bin)
     resolved = None
@@ -172,6 +218,10 @@ def run_codex(
         command.extend(["-m", config.codex_model])
     command.extend(config.codex_extra_args)
     command.append("-")
+    env = build_codex_env(config)
+    proxy_url = env.get("HTTPS_PROXY")
+    if proxy_url:
+        print(f"[{config.worker_id}] codex proxy enabled: {proxy_url}")
 
     process = subprocess.run(
         command,
@@ -180,6 +230,7 @@ def run_codex(
         capture_output=True,
         check=False,
         timeout=config.codex_timeout_seconds,
+        env=env,
     )
     stdout_path.write_text(process.stdout, encoding="utf-8")
     stderr_path.write_text(process.stderr, encoding="utf-8")
@@ -196,6 +247,7 @@ def run_codex(
                 "returncode": process.returncode,
                 "workspace_dir": str(workspace_dir),
                 "task_id": task["id"],
+                "proxy_url": proxy_url,
             },
             ensure_ascii=False,
             indent=2,
