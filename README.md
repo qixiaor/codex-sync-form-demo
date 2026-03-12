@@ -70,6 +70,17 @@ python -m codex_orchestrator pool `
 4. 成功则把状态更新为 `已完成`
 5. 失败则释放回 `未开始`
 
+如果是 Windows，程序现在会自动把 `codex` 解析到 `codex.cmd` / `codex.exe`。如果你的环境变量比较特殊，也可以手动指定：
+
+```powershell
+python -m codex_orchestrator pool `
+  --server-url http://127.0.0.1:8000 `
+  --workers 3 `
+  --template-dir . `
+  --runtime-dir .codex-runtime `
+  --codex-bin codex.cmd
+```
+
 ## 目录说明
 
 - `.codex-runtime/tasks.db`: 任务数据库

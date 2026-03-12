@@ -2,9 +2,10 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from codex_orchestrator.store import TaskStore
-from codex_orchestrator.worker import copy_template
+from codex_orchestrator.worker import copy_template, resolve_codex_launcher
 
 
 class TaskStoreTests(unittest.TestCase):
@@ -73,6 +74,25 @@ class TaskStoreTests(unittest.TestCase):
 
             self.assertTrue((workspace_dir / "app.txt").exists())
             self.assertFalse((workspace_dir / ".codex-runtime").exists())
+
+    def test_resolve_codex_launcher_uses_cmd_on_windows(self) -> None:
+        with mock.patch("codex_orchestrator.worker.shutil.which", return_value=r"E:\nodejs\codex.cmd"):
+            self.assertEqual([r"E:\nodejs\codex.cmd"], resolve_codex_launcher("codex"))
+
+    def test_resolve_codex_launcher_wraps_ps1(self) -> None:
+        with mock.patch("codex_orchestrator.worker.shutil.which", return_value=r"E:\nodejs\codex.ps1"):
+            self.assertEqual(
+                [
+                    "powershell",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    r"E:\nodejs\codex.ps1",
+                ],
+                resolve_codex_launcher("codex"),
+            )
 
 
 if __name__ == "__main__":

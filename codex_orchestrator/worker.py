@@ -55,7 +55,12 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
     heartbeat_thread.start()
 
     try:
-        result = run_codex(config, task, workspace_dir, logs_dir)
+        try:
+            result = run_codex(config, task, workspace_dir, logs_dir)
+        except Exception as exc:
+            client.release(task_id, config.worker_id, f"worker execution failed: {exc}")
+            print(f"[{config.worker_id}] task {task_id} failed before codex completed: {exc}", file=sys.stderr)
+            return
         if result["returncode"] == 0:
             client.complete(task_id, config.worker_id, result["summary"])
         else:
@@ -101,6 +106,33 @@ def build_prompt(task: dict[str, object]) -> str:
     )
 
 
+def resolve_codex_launcher(codex_bin: str) -> list[str]:
+    candidate = Path(codex_bin)
+    resolved = None
+    if candidate.is_file():
+        resolved = str(candidate)
+    else:
+        resolved = shutil.which(codex_bin)
+    if not resolved:
+        raise FileNotFoundError(
+            f"cannot find Codex executable '{codex_bin}'. "
+            "On Windows, pass --codex-bin codex.cmd or an absolute path to codex.exe/codex.cmd."
+        )
+
+    resolved_path = Path(resolved)
+    if resolved_path.suffix.lower() == ".ps1":
+        return [
+            "powershell",
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(resolved_path),
+        ]
+    return [str(resolved_path)]
+
+
 def run_codex(
     config: WorkerConfig,
     task: dict[str, object],
@@ -114,7 +146,7 @@ def run_codex(
     metadata_path = logs_dir / "metadata.json"
 
     command = [
-        config.codex_bin,
+        *resolve_codex_launcher(config.codex_bin),
         "-a",
         "never",
         "exec",
