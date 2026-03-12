@@ -1,0 +1,9 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-task-orchestrator"
+version = "0.1.0"
+description = "Run fresh Codex CLI workers against an online task queue."
+requires-python = ">=3.10"
