@@ -42,6 +42,7 @@ def _add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--server-url", required=True)
     parser.add_argument("--template-dir", default=".")
     parser.add_argument("--runtime-dir", default=".codex-runtime")
+    parser.add_argument("--results-dir")
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--codex-model")
     parser.add_argument("--lease-seconds", type=int, default=180)
@@ -72,11 +73,14 @@ def main() -> None:
         return
 
     if args.command == "worker":
+        runtime_dir = Path(args.runtime_dir).resolve()
+        results_dir = Path(args.results_dir).resolve() if args.results_dir else _default_results_dir(runtime_dir)
         config = WorkerConfig(
             server_url=args.server_url,
             worker_id=args.worker_id,
             template_dir=Path(args.template_dir).resolve(),
-            runtime_dir=Path(args.runtime_dir).resolve(),
+            runtime_dir=runtime_dir,
+            results_dir=results_dir,
             codex_bin=args.codex_bin,
             codex_model=args.codex_model,
             lease_seconds=args.lease_seconds,
@@ -91,11 +95,14 @@ def main() -> None:
         return
 
     if args.command == "pool":
+        runtime_dir = Path(args.runtime_dir).resolve()
+        results_dir = Path(args.results_dir).resolve() if args.results_dir else _default_results_dir(runtime_dir)
         run_pool(
             worker_count=args.workers,
             server_url=args.server_url,
             template_dir=Path(args.template_dir).resolve(),
-            runtime_dir=Path(args.runtime_dir).resolve(),
+            runtime_dir=runtime_dir,
+            results_dir=results_dir,
             codex_bin=args.codex_bin,
             codex_model=args.codex_model,
             lease_seconds=args.lease_seconds,
@@ -109,6 +116,12 @@ def main() -> None:
         return
 
     parser.error("unknown command")
+
+
+def _default_results_dir(runtime_dir: Path) -> Path:
+    if runtime_dir.name.startswith("worker-"):
+        return (runtime_dir.parent / "task-results").resolve()
+    return (runtime_dir / "task-results").resolve()
 
 
 if __name__ == "__main__":

@@ -5,7 +5,13 @@ from pathlib import Path
 from unittest import mock
 
 from codex_orchestrator.store import TaskStore
-from codex_orchestrator.worker import WorkerConfig, build_codex_env, copy_template, resolve_codex_launcher
+from codex_orchestrator.worker import (
+    WorkerConfig,
+    build_codex_env,
+    copy_template,
+    resolve_codex_launcher,
+    write_task_result,
+)
 
 
 class TaskStoreTests(unittest.TestCase):
@@ -100,6 +106,7 @@ class TaskStoreTests(unittest.TestCase):
             worker_id="worker-0",
             template_dir=Path("."),
             runtime_dir=Path(".codex-runtime"),
+            results_dir=Path(".codex-runtime/task-results"),
             proxy_url="http://127.0.0.1:7890",
             auto_proxy=False,
         )
@@ -113,10 +120,48 @@ class TaskStoreTests(unittest.TestCase):
             worker_id="worker-0",
             template_dir=Path("."),
             runtime_dir=Path(".codex-runtime"),
+            results_dir=Path(".codex-runtime/task-results"),
         )
         with mock.patch("codex_orchestrator.worker.is_proxy_reachable", return_value=True):
             env = build_codex_env(config)
         self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
+
+    def test_write_task_result_creates_task_named_summary_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            config = WorkerConfig(
+                server_url="http://127.0.0.1:8000",
+                worker_id="worker-0",
+                template_dir=root,
+                runtime_dir=root / "runtime",
+                results_dir=root / "runtime" / "task-results",
+            )
+            run_dir = root / "runtime" / "worker-0" / "task-0001-demo"
+            logs_dir = run_dir / "logs"
+            workspace_dir = run_dir / "workspace"
+            logs_dir.mkdir(parents=True)
+            workspace_dir.mkdir(parents=True)
+
+            write_task_result(
+                config=config,
+                task={
+                    "id": 1,
+                    "title": "demo task",
+                    "detail": "detail",
+                    "status": "已完成",
+                    "attempt_count": 1,
+                    "claimed_by": None,
+                },
+                execution_status="completed",
+                run_dir=run_dir,
+                workspace_dir=workspace_dir,
+                logs_dir=logs_dir,
+                result_summary="done",
+                codex_returncode=0,
+            )
+
+            self.assertTrue((config.results_dir / "task-0001-demo-task.json").exists())
+            self.assertTrue((config.results_dir / "task-0001-demo-task.txt").exists())
 
 
 if __name__ == "__main__":

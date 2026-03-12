@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -21,6 +22,7 @@ class WorkerConfig:
     worker_id: str
     template_dir: Path
     runtime_dir: Path
+    results_dir: Path
     codex_bin: str = "codex"
     codex_model: str | None = None
     lease_seconds: int = 180
@@ -57,7 +59,7 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
     task_id = int(task["id"])
     print(f"[{config.worker_id}] claimed task {task_id}: {task['title']}")
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    run_dir = config.runtime_dir / f"task-{task_id}-{run_stamp}"
+    run_dir = config.runtime_dir / f"task-{task_id:04d}-{slugify(str(task['title']))}-{run_stamp}"
     workspace_dir = run_dir / "workspace"
     logs_dir = run_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -76,14 +78,44 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
             print(f"[{config.worker_id}] starting codex for task {task_id}")
             result = run_codex(config, task, workspace_dir, logs_dir)
         except Exception as exc:
-            client.release(task_id, config.worker_id, f"worker execution failed: {exc}")
+            released_task = client.release(task_id, config.worker_id, f"worker execution failed: {exc}")
+            write_task_result(
+                config=config,
+                task=released_task or task,
+                execution_status="released",
+                run_dir=run_dir,
+                workspace_dir=workspace_dir,
+                logs_dir=logs_dir,
+                result_summary=f"worker execution failed: {exc}",
+                codex_returncode=None,
+            )
             print(f"[{config.worker_id}] task {task_id} failed before codex completed: {exc}", file=sys.stderr)
             return
         if result["returncode"] == 0:
-            client.complete(task_id, config.worker_id, result["summary"])
+            completed_task = client.complete(task_id, config.worker_id, result["summary"])
+            write_task_result(
+                config=config,
+                task=completed_task or task,
+                execution_status="completed",
+                run_dir=run_dir,
+                workspace_dir=workspace_dir,
+                logs_dir=logs_dir,
+                result_summary=result["summary"],
+                codex_returncode=result["returncode"],
+            )
             print(f"[{config.worker_id}] completed task {task_id}")
         else:
-            client.release(task_id, config.worker_id, result["summary"])
+            released_task = client.release(task_id, config.worker_id, result["summary"])
+            write_task_result(
+                config=config,
+                task=released_task or task,
+                execution_status="released",
+                run_dir=run_dir,
+                workspace_dir=workspace_dir,
+                logs_dir=logs_dir,
+                result_summary=result["summary"],
+                codex_returncode=result["returncode"],
+            )
             print(f"[{config.worker_id}] released task {task_id} after codex exit {result['returncode']}", file=sys.stderr)
     finally:
         stop_heartbeat.set()
@@ -123,6 +155,71 @@ def build_prompt(task: dict[str, object]) -> str:
         "4. 最终输出一段简短总结，说明改了什么、如何验证、还有什么风险。\n\n"
         f"任务标题：{title}\n"
         f"任务详情：{detail}\n"
+    )
+
+
+def slugify(value: str) -> str:
+    normalized = re.sub(r"\s+", "-", value.strip())
+    normalized = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]", "-", normalized)
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("-_")
+    return normalized[:40] or "untitled"
+
+
+def write_task_result(
+    config: WorkerConfig,
+    task: dict[str, object],
+    execution_status: str,
+    run_dir: Path,
+    workspace_dir: Path,
+    logs_dir: Path,
+    result_summary: str,
+    codex_returncode: int | None,
+) -> None:
+    config.results_dir.mkdir(parents=True, exist_ok=True)
+    task_id = int(task["id"])
+    base_name = f"task-{task_id:04d}-{slugify(str(task['title']))}"
+    payload = {
+        "task_id": task_id,
+        "title": task["title"],
+        "detail": task["detail"],
+        "task_status": task.get("status"),
+        "execution_status": execution_status,
+        "worker_id": config.worker_id,
+        "attempt_count": task.get("attempt_count"),
+        "claimed_by": task.get("claimed_by"),
+        "result_summary": result_summary,
+        "codex_returncode": codex_returncode,
+        "run_dir": str(run_dir),
+        "workspace_dir": str(workspace_dir),
+        "logs_dir": str(logs_dir),
+        "stdout_path": str(logs_dir / "stdout.txt"),
+        "stderr_path": str(logs_dir / "stderr.txt"),
+        "final_message_path": str(logs_dir / "final_message.txt"),
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    json_path = config.results_dir / f"{base_name}.json"
+    txt_path = config.results_dir / f"{base_name}.txt"
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    txt_path.write_text(
+        "\n".join(
+            [
+                f"task_id: {task_id}",
+                f"title: {task['title']}",
+                f"detail: {task['detail']}",
+                f"task_status: {task.get('status')}",
+                f"execution_status: {execution_status}",
+                f"worker_id: {config.worker_id}",
+                f"attempt_count: {task.get('attempt_count')}",
+                f"codex_returncode: {codex_returncode}",
+                f"run_dir: {run_dir}",
+                f"workspace_dir: {workspace_dir}",
+                f"logs_dir: {logs_dir}",
+                "result_summary:",
+                str(result_summary).strip(),
+                "",
+            ]
+        ),
+        encoding="utf-8",
     )
 
 

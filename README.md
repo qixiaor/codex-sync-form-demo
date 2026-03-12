@@ -31,6 +31,8 @@
 2. 多个 Codex CLI 写同一目录的冲突
    每个任务都会先复制一个独立工作目录，然后在这个目录里执行新的 `codex exec`。这样不同任务不会在同一份代码上互相覆盖。
 
+之所以默认复制 workspace，是因为多个 Codex CLI 同时在同一目录改文件时，结果很容易互相覆盖，最终既无法知道是谁改坏的，也无法可靠回滚。独立 workspace 是当前并发模式下最稳妥的隔离方式。
+
 另外还有租约机制：
 
 - worker 抢到任务后会带一个 `lease_seconds`
@@ -99,6 +101,7 @@ python -m codex_orchestrator pool `
 - `.codex-runtime/tasks.db`: 任务数据库
 - `.codex-runtime/worker-*/task-*/workspace`: 每个任务的独立工作区
 - `.codex-runtime/worker-*/task-*/logs`: `codex` 标准输出、错误输出和最终摘要
+- `.codex-runtime/task-results/task-0001-*.json|txt`: 按 task 编号输出的结果摘要，里面会直接写明标题、详情、状态、worker、workspace、logs 路径
 
 ## 运行测试
 
