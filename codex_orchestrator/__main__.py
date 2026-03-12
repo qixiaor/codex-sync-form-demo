@@ -46,6 +46,7 @@ def _add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--codex-model")
     parser.add_argument("--lease-seconds", type=int, default=180)
     parser.add_argument("--poll-interval", type=int, default=5)
+    parser.add_argument("--codex-timeout-seconds", type=int, default=900)
     parser.add_argument("--codex-arg", action="append", default=[])
 
 
@@ -77,6 +78,7 @@ def main() -> None:
             codex_model=args.codex_model,
             lease_seconds=args.lease_seconds,
             poll_interval=args.poll_interval,
+            codex_timeout_seconds=args.codex_timeout_seconds,
             codex_extra_args=args.codex_arg,
         )
         run_worker(config)
@@ -92,6 +94,7 @@ def main() -> None:
             codex_model=args.codex_model,
             lease_seconds=args.lease_seconds,
             poll_interval=args.poll_interval,
+            codex_timeout_seconds=args.codex_timeout_seconds,
             codex_extra_args=args.codex_arg,
         )
         return

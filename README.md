@@ -59,7 +59,8 @@ python -m codex_orchestrator pool `
   --server-url http://127.0.0.1:8000 `
   --workers 3 `
   --template-dir . `
-  --runtime-dir .codex-runtime
+  --runtime-dir .codex-runtime `
+  --codex-timeout-seconds 900
 ```
 
 这会启动 3 个独立 worker。每个 worker 会循环：

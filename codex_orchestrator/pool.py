@@ -15,6 +15,7 @@ def run_pool(
     codex_model: str | None,
     lease_seconds: int,
     poll_interval: int,
+    codex_timeout_seconds: int,
     codex_extra_args: list[str],
 ) -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -30,6 +31,7 @@ def run_pool(
                 codex_model=codex_model,
                 lease_seconds=lease_seconds,
                 poll_interval=poll_interval,
+                codex_timeout_seconds=codex_timeout_seconds,
                 codex_extra_args=codex_extra_args,
             )
 
@@ -49,6 +51,7 @@ def run_pool(
                     codex_model=codex_model,
                     lease_seconds=lease_seconds,
                     poll_interval=poll_interval,
+                    codex_timeout_seconds=codex_timeout_seconds,
                     codex_extra_args=codex_extra_args,
                 )
     except KeyboardInterrupt:
@@ -73,6 +76,7 @@ def _spawn_worker(
     codex_model: str | None,
     lease_seconds: int,
     poll_interval: int,
+    codex_timeout_seconds: int,
     codex_extra_args: list[str],
 ) -> subprocess.Popen[str]:
     worker_runtime = runtime_dir / f"worker-{index}"
@@ -94,6 +98,8 @@ def _spawn_worker(
         str(lease_seconds),
         "--poll-interval",
         str(poll_interval),
+        "--codex-timeout-seconds",
+        str(codex_timeout_seconds),
         "--codex-bin",
         codex_bin,
     ]

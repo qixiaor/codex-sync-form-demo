@@ -23,6 +23,7 @@ class WorkerConfig:
     codex_model: str | None = None
     lease_seconds: int = 180
     poll_interval: int = 5
+    codex_timeout_seconds: int = 900
     codex_extra_args: list[str] = field(default_factory=list)
 
 
@@ -30,7 +31,12 @@ def run_worker(config: WorkerConfig) -> None:
     client = TaskClient(config.server_url)
     config.runtime_dir.mkdir(parents=True, exist_ok=True)
     while True:
-        task = client.claim(config.worker_id, config.lease_seconds)
+        try:
+            task = client.claim(config.worker_id, config.lease_seconds)
+        except Exception as exc:
+            print(f"[{config.worker_id}] claim failed: {exc}", file=sys.stderr)
+            time.sleep(config.poll_interval)
+            continue
         if task is None:
             time.sleep(config.poll_interval)
             continue
@@ -39,6 +45,7 @@ def run_worker(config: WorkerConfig) -> None:
 
 def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, object]) -> None:
     task_id = int(task["id"])
+    print(f"[{config.worker_id}] claimed task {task_id}: {task['title']}")
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     run_dir = config.runtime_dir / f"task-{task_id}-{run_stamp}"
     workspace_dir = run_dir / "workspace"
@@ -56,6 +63,7 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
 
     try:
         try:
+            print(f"[{config.worker_id}] starting codex for task {task_id}")
             result = run_codex(config, task, workspace_dir, logs_dir)
         except Exception as exc:
             client.release(task_id, config.worker_id, f"worker execution failed: {exc}")
@@ -63,8 +71,10 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
             return
         if result["returncode"] == 0:
             client.complete(task_id, config.worker_id, result["summary"])
+            print(f"[{config.worker_id}] completed task {task_id}")
         else:
             client.release(task_id, config.worker_id, result["summary"])
+            print(f"[{config.worker_id}] released task {task_id} after codex exit {result['returncode']}", file=sys.stderr)
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=5)
@@ -169,6 +179,7 @@ def run_codex(
         text=True,
         capture_output=True,
         check=False,
+        timeout=config.codex_timeout_seconds,
     )
     stdout_path.write_text(process.stdout, encoding="utf-8")
     stderr_path.write_text(process.stderr, encoding="utf-8")
