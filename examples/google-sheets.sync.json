@@ -1,0 +1,11 @@
+{
+  "provider": "google-sheets",
+  "name": "google-sheet-demo",
+  "spreadsheet_id": "YOUR_SPREADSHEET_ID",
+  "sheet_name": "Sheet1",
+  "header_row": 1,
+  "read_range": "'Sheet1'!A:C",
+  "status_column": "C",
+  "access_token_env": "GOOGLE_ACCESS_TOKEN",
+  "timeout_seconds": 30
+}

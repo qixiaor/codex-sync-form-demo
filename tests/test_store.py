@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest import mock
 
 from codex_orchestrator.store import TaskStore
+from codex_orchestrator.sync_providers import SourceTask
+from codex_orchestrator.sync_service import sync_once
 from codex_orchestrator.worker import (
     WorkerConfig,
     build_codex_env,
@@ -162,6 +164,56 @@ class TaskStoreTests(unittest.TestCase):
 
             self.assertTrue((config.results_dir / "task-0001-demo-task.json").exists())
             self.assertTrue((config.results_dir / "task-0001-demo-task.txt").exists())
+
+    def test_upsert_external_task_binds_source_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TaskStore(Path(tmpdir) / "tasks.db")
+            task = store.upsert_external_task(
+                source_name="google-sheet-demo",
+                source_task_key="2",
+                title="sheet task",
+                detail="detail",
+                status="未开始",
+            )
+            self.assertEqual("google-sheet-demo", task["source_name"])
+            self.assertEqual("2", task["source_task_key"])
+
+            updated = store.upsert_external_task(
+                source_name="google-sheet-demo",
+                source_task_key="2",
+                title="sheet task updated",
+                detail="detail 2",
+                status="已完成",
+            )
+            self.assertEqual(task["id"], updated["id"])
+            self.assertEqual("sheet task updated", updated["title"])
+            self.assertEqual("detail 2", updated["detail"])
+            self.assertEqual("未开始", updated["status"])
+
+    def test_sync_once_imports_and_pushes_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "tasks.db"
+
+            provider = mock.Mock()
+            provider.name = "sheet-demo"
+            provider.can_write = True
+            provider.list_tasks.return_value = [
+                SourceTask(source_task_key="2", title="task a", detail="detail a", status="未开始"),
+                SourceTask(source_task_key="3", title="task b", detail="detail b", status="未开始"),
+            ]
+
+            with mock.patch("codex_orchestrator.sync_service.load_provider_config"), mock.patch(
+                "codex_orchestrator.sync_service.create_provider",
+                return_value=provider,
+            ):
+                result = sync_once(db_path, Path(tmpdir) / "provider.json")
+
+            self.assertEqual({"imported": 2, "updated": 2}, result)
+            store = TaskStore(db_path)
+            tasks = store.list_tasks_for_source("sheet-demo")
+            self.assertEqual(2, len(tasks))
+            provider.update_status.assert_any_call("2", "未开始")
+            provider.update_status.assert_any_call("3", "未开始")
 
 
 if __name__ == "__main__":

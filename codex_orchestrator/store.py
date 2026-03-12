@@ -58,6 +58,23 @@ class TaskStore:
                 )
                 """
             )
+            self._ensure_task_columns(conn)
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_source
+                ON tasks (source_name, source_task_key)
+                WHERE source_name IS NOT NULL AND source_task_key IS NOT NULL
+                """
+            )
+
+    def _ensure_task_columns(self, conn: sqlite3.Connection) -> None:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "source_name" not in columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN source_name TEXT")
+        if "source_task_key" not in columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN source_task_key TEXT")
+        if "source_updated_at" not in columns:
+            conn.execute("ALTER TABLE tasks ADD COLUMN source_updated_at TEXT")
 
     def add_task(self, title: str, detail: str, status: str = STATUS_PENDING) -> dict[str, Any]:
         if status not in VALID_STATUSES:
@@ -76,6 +93,76 @@ class TaskStore:
         if task is None:
             raise RuntimeError("task insert failed")
         return task
+
+    def upsert_external_task(
+        self,
+        source_name: str,
+        source_task_key: str,
+        title: str,
+        detail: str,
+        status: str,
+    ) -> dict[str, Any]:
+        if status not in VALID_STATUSES:
+            raise ValueError(f"invalid status: {status}")
+        now = to_iso(utc_now())
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT *
+                FROM tasks
+                WHERE source_name = ?
+                  AND source_task_key = ?
+                """,
+                (source_name, source_task_key),
+            ).fetchone()
+            if row is None:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        title,
+                        detail,
+                        status,
+                        source_name,
+                        source_task_key,
+                        source_updated_at,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (title, detail, status, source_name, source_task_key, now, now, now),
+                )
+                task_id = cursor.lastrowid
+            else:
+                conn.execute(
+                    """
+                    UPDATE tasks
+                    SET title = ?,
+                        detail = ?,
+                        source_updated_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (title, detail, now, now, row["id"]),
+                )
+                task_id = row["id"]
+            task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            conn.execute("COMMIT")
+        return self._row_to_dict(task)
+
+    def list_tasks_for_source(self, source_name: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM tasks
+                WHERE source_name = ?
+                ORDER BY id
+                """,
+                (source_name,),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
 
     def list_tasks(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -238,6 +325,9 @@ class TaskStore:
             "title": row["title"],
             "detail": row["detail"],
             "status": row["status"],
+            "source_name": row["source_name"] if "source_name" in row.keys() else None,
+            "source_task_key": row["source_task_key"] if "source_task_key" in row.keys() else None,
+            "source_updated_at": row["source_updated_at"] if "source_updated_at" in row.keys() else None,
             "claimed_by": row["claimed_by"],
             "lease_expires_at": row["lease_expires_at"],
             "attempt_count": row["attempt_count"],

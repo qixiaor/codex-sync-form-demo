@@ -7,6 +7,7 @@ from pathlib import Path
 from .client import TaskClient
 from .pool import run_pool
 from .server import serve_forever
+from .sync_service import sync_loop, sync_once
 from .worker import WorkerConfig, run_worker
 
 
@@ -34,6 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
     pool_parser = subparsers.add_parser("pool", help="spawn multiple workers")
     _add_worker_args(pool_parser)
     pool_parser.add_argument("--workers", type=int, default=2)
+
+    sync_parser = subparsers.add_parser("sync", help="sync tasks from an online sheet provider")
+    sync_subparsers = sync_parser.add_subparsers(dest="sync_command", required=True)
+
+    sync_once_parser = sync_subparsers.add_parser("once", help="run one sync cycle")
+    sync_once_parser.add_argument("--db", default=".codex-runtime/tasks.db")
+    sync_once_parser.add_argument("--config", required=True)
+
+    sync_loop_parser = sync_subparsers.add_parser("loop", help="run sync continuously")
+    sync_loop_parser.add_argument("--db", default=".codex-runtime/tasks.db")
+    sync_loop_parser.add_argument("--config", required=True)
+    sync_loop_parser.add_argument("--interval-seconds", type=int, default=15)
 
     return parser
 
@@ -114,6 +127,14 @@ def main() -> None:
             codex_extra_args=args.codex_arg,
         )
         return
+
+    if args.command == "sync":
+        if args.sync_command == "once":
+            print(json.dumps(sync_once(args.db, args.config), ensure_ascii=False, indent=2))
+            return
+        if args.sync_command == "loop":
+            sync_loop(args.db, args.config, args.interval_seconds)
+            return
 
     parser.error("unknown command")
 

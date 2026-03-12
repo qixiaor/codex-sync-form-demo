@@ -1,6 +1,6 @@
 # Codex CLI Task Orchestrator
 
-这个程序会把任务放在一个在线 HTTP URL 后面，然后自动拉起多个全新的 `codex exec` 进程去执行任务。每个任务都运行在新的 Codex CLI 会话里，因此不会继承上一个任务的上下文。
+这个程序会把任务放在一个在线任务源后面，然后自动拉起多个全新的 `codex exec` 进程去执行任务。每个任务都运行在新的 Codex CLI 会话里，因此不会继承上一个任务的上下文。
 
 ## 任务表
 
@@ -16,7 +16,7 @@
 - `执行中`
 - `已完成`
 
-服务启动后，可以通过：
+本地任务服务启动后，可以通过：
 
 - `GET /` 查看网页表格
 - `GET /table.tsv` 查看 TSV 形式的 A-C 三列
@@ -38,6 +38,24 @@
 - worker 抢到任务后会带一个 `lease_seconds`
 - 运行期间持续 heartbeat
 - 如果 worker 崩溃，租约到期后任务会被自动回收到 `未开始`
+
+## 在线表格适配
+
+现在的结构分成两层：
+
+1. 在线表格适配层
+   负责从在线表格读取 `标题 / 任务详情 / 状态`，并把本地执行状态回写回去。
+2. 本地任务队列层
+   负责并发 claim、租约、完成、失败释放。这一层仍然用 SQLite 做原子控制。
+
+这样做的原因是，大多数在线表格 API 都不提供可靠的“原子抢任务”语义。如果让多个 worker 直接抢在线表格，很容易出现同一行被多个 worker 同时领取。现在改成“先同步到本地，再由本地原子分发”，并发行为会稳定很多。
+
+当前内置了两个在线表格 provider：
+
+- `google-sheets`
+- `generic-json`
+
+其中 `generic-json` 是通用 REST 表格适配器，适合给飞书、钉钉、自建表格 API 做包装。
 
 ## 快速开始
 
@@ -64,6 +82,25 @@ python -m codex_orchestrator pool `
   --runtime-dir .codex-runtime `
   --server-timeout-seconds 10 `
   --codex-timeout-seconds 900
+```
+
+### 4. 同步在线表格
+
+单次同步：
+
+```powershell
+python -m codex_orchestrator sync once `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\google-sheets.sync.json
+```
+
+持续同步：
+
+```powershell
+python -m codex_orchestrator sync loop `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\google-sheets.sync.json `
+  --interval-seconds 15
 ```
 
 这会启动 3 个独立 worker。每个 worker 会循环：
@@ -96,6 +133,39 @@ python -m codex_orchestrator pool `
   --proxy-url http://127.0.0.1:7890
 ```
 
+## Provider 配置
+
+### Google Sheets
+
+示例文件：[`examples/google-sheets.sync.json`](f:/work/codexSyncDemo/examples/google-sheets.sync.json)
+
+需要提供：
+
+- `spreadsheet_id`
+- `sheet_name`
+- `access_token` 或 `access_token_env`
+
+Google Sheets provider 约定：
+
+- A列：标题
+- B列：任务详情
+- C列：状态
+- 第 1 行默认是表头
+- 实际回写时会直接更新对应行的 C 列状态
+
+### Generic JSON
+
+示例文件：[`examples/generic-json.sync.json`](f:/work/codexSyncDemo/examples/generic-json.sync.json)
+
+这个 provider 用于适配“在线表格已经有 HTTP API”的场景。你只需要告诉程序：
+
+- 从哪个 URL 读列表
+- 列表数组在 JSON 里的哪一层
+- 哪个字段是 `id/title/detail/status`
+- 更新单条状态时的 URL 模板和 HTTP 方法
+
+`headers` 支持 `${ENV_NAME}` 形式的环境变量替换，方便放 token。
+
 ## 目录说明
 
 - `.codex-runtime/tasks.db`: 任务数据库
@@ -111,6 +181,7 @@ python -m unittest discover -s tests -v
 
 ## 说明
 
-- 默认实现把“在线 URL”定义为这个程序自带的 HTTP 任务服务。
-- 如果你后面要接入现有的在线表格系统，比如 Google Sheets、飞书多维表格或自建 API，可以保留 worker/pool，不动并发模型，只替换 `TaskClient` 和服务端适配层。
+- 默认本地 worker 仍然连程序自带的 HTTP 任务服务；在线表格通过 `sync` 命令导入/回写，不直接给 worker 抢。
+- `sync` 当前会把在线表格里的标题和详情持续同步到本地；状态以本地队列为准，再反向回写到在线表格。
+- 如果你后面要接入现有的在线表格系统，比如 Google Sheets、飞书多维表格、钉钉表格或自建 API，优先新增一个 provider，不要改 worker 的并发控制逻辑。
 - 当前实现不会自动把多个并发任务的代码改动合并回同一份目录，因为这件事没有可靠的无冲突通用方案。程序会把每个任务结果保存在独立工作区里，供你后续审查或手工合并。
