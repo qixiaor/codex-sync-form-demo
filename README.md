@@ -1,10 +1,18 @@
 # Codex CLI Task Orchestrator
 
-这个程序会把任务放在一个在线任务源后面，然后自动拉起多个全新的 `codex exec` 进程去执行任务。每个任务都运行在新的 Codex CLI 会话里，因此不会继承上一个任务的上下文。
+这个程序的目标是：
 
-## 任务表
+1. 从在线任务源读取任务
+2. 把任务同步到本地 SQLite 队列
+3. 用多个全新的 `codex exec` 会话并发执行任务
+4. 把执行状态写回本地任务服务
+5. 再由同步程序把状态回写到在线表格
 
-表格前三列固定语义如下：
+每个任务都运行在新的 Codex CLI 会话里，因此不会继承上一个任务的上下文。
+
+## 任务表格式
+
+在线表格固定按前三列读取：
 
 | A列 | B列 | C列 |
 | --- | --- | --- |
@@ -15,6 +23,21 @@
 - `未开始`
 - `执行中`
 - `已完成`
+
+## 组件说明
+
+这个程序运行时通常有 3 个长期进程：
+
+1. `serve`
+   本地任务服务。worker 不直接读在线表格，而是只连这个本地服务。
+2. `sync loop`
+   在线表格同步进程。负责把在线表格导入本地数据库，并把本地状态回写到在线表格。
+3. `pool`
+   worker 池。负责启动多个独立 worker，每个 worker 再启动新的 `codex exec` 执行任务。
+
+关系可以理解成：
+
+`在线表格 <-> sync loop <-> SQLite / 本地任务服务 <-> worker pool <-> codex exec`
 
 本地任务服务启动后，可以通过：
 
@@ -57,36 +80,47 @@
 
 其中 `generic-json` 是通用 REST 表格适配器，适合给飞书、钉钉、自建表格 API 做包装。
 
-## 快速开始
+## 启动流程
 
-### 1. 启动服务
+推荐按下面顺序启动。最清晰的方式是开 3 个终端窗口。
+
+### 第 0 步：准备 Google Sheets 凭证
+
+如果你用的是 Google Sheets：
+
+1. 在 Google Cloud 创建一个 service account
+2. 下载 JSON 密钥文件
+3. 把 service account 邮箱加到你的 Google Sheet 共享成员里
+4. 修改 [`examples/google-sheets.sync.json`](f:/work/codexSyncDemo/examples/google-sheets.sync.json)
+
+至少改这两项：
+
+- `spreadsheet_url`
+- `service_account_file`
+
+并安装依赖：
+
+```powershell
+python -m pip install google-auth
+```
+
+### 第 1 步：启动本地任务服务
 
 ```powershell
 python -m codex_orchestrator serve --host 127.0.0.1 --port 8000 --db .codex-runtime/tasks.db
 ```
 
-### 2. 新增任务
+这个进程的作用：
 
-```powershell
-python -m codex_orchestrator add --server-url http://127.0.0.1:8000 --title "修复登录页" --detail "检查项目并修复登录按钮点击无响应的问题"
-python -m codex_orchestrator add --server-url http://127.0.0.1:8000 --title "补测试" --detail "为订单金额计算补充边界测试"
-```
+- 提供本地 API 给 worker 抢任务
+- 维护 SQLite 里的任务状态
+- 对外提供 `/api/tasks`、`/table.tsv`、`/`
 
-### 3. 启动 worker 池
+建议这个终端一直保持运行。
 
-```powershell
-python -m codex_orchestrator pool `
-  --server-url http://127.0.0.1:8000 `
-  --workers 3 `
-  --template-dir . `
-  --runtime-dir .codex-runtime `
-  --server-timeout-seconds 10 `
-  --codex-timeout-seconds 900
-```
+### 第 2 步：启动在线表格同步
 
-### 4. 同步在线表格
-
-单次同步：
+单次调试先用：
 
 ```powershell
 python -m codex_orchestrator sync once `
@@ -94,7 +128,7 @@ python -m codex_orchestrator sync once `
   --config .\examples\google-sheets.sync.json
 ```
 
-持续同步：
+确认没问题后，再启动持续同步：
 
 ```powershell
 python -m codex_orchestrator sync loop `
@@ -103,15 +137,17 @@ python -m codex_orchestrator sync loop `
   --interval-seconds 15
 ```
 
-这会启动 3 个独立 worker。每个 worker 会循环：
+这个进程的作用：
 
-1. 从在线 URL 抢一条 `未开始` 任务
-2. 复制工作目录
-3. 启动一个全新的 `codex exec`
-4. 成功则把状态更新为 `已完成`
-5. 失败则释放回 `未开始`
+- 从 Google Sheet 读取 A/B/C 三列
+- 导入本地 SQLite
+- 把本地任务状态回写到 Google Sheet
 
-如果是 Windows，程序现在会自动把 `codex` 解析到 `codex.cmd` / `codex.exe`。如果你的环境变量比较特殊，也可以手动指定：
+建议这个终端也一直保持运行。
+
+### 第 3 步：启动 worker 池
+
+如果是 Windows，建议显式指定 `codex.cmd`。
 
 ```powershell
 python -m codex_orchestrator pool `
@@ -119,10 +155,12 @@ python -m codex_orchestrator pool `
   --workers 3 `
   --template-dir . `
   --runtime-dir .codex-runtime `
-  --codex-bin codex.cmd
+  --codex-bin codex.cmd `
+  --server-timeout-seconds 10 `
+  --codex-timeout-seconds 900
 ```
 
-如果本机开着本地代理，worker 会自动探测 `http://127.0.0.1:7890` 并只对 `codex exec` 注入 `HTTP_PROXY / HTTPS_PROXY / ALL_PROXY`。也可以手动指定：
+如果本机代理开在 `7890`，可以再加：
 
 ```powershell
 python -m codex_orchestrator pool `
@@ -130,7 +168,56 @@ python -m codex_orchestrator pool `
   --workers 3 `
   --template-dir . `
   --runtime-dir .codex-runtime `
+  --codex-bin codex.cmd `
   --proxy-url http://127.0.0.1:7890
+```
+
+这个进程的作用：
+
+- 从本地任务服务领取 `未开始` 任务
+- 给每个任务复制独立 workspace
+- 启动新的 `codex exec`
+- 完成后更新状态
+
+### 第 4 步：确认系统在正常工作
+
+可以打开：
+
+- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:8000/api/tasks`
+
+正常情况下你会看到状态流转：
+
+1. 从在线 URL 抢一条 `未开始` 任务
+2. 变成 `执行中`
+3. 启动一个全新的 `codex exec`
+4. 成功则把状态更新为 `已完成`
+5. 失败则回退为 `未开始`
+
+## 常用命令
+
+### 本地服务
+
+```powershell
+python -m codex_orchestrator serve --host 127.0.0.1 --port 8000 --db .codex-runtime/tasks.db
+```
+
+### 单次同步
+
+```powershell
+python -m codex_orchestrator sync once --db .codex-runtime/tasks.db --config .\examples\google-sheets.sync.json
+```
+
+### 持续同步
+
+```powershell
+python -m codex_orchestrator sync loop --db .codex-runtime/tasks.db --config .\examples\google-sheets.sync.json --interval-seconds 15
+```
+
+### 启动 worker 池
+
+```powershell
+python -m codex_orchestrator pool --server-url http://127.0.0.1:8000 --workers 3 --template-dir . --runtime-dir .codex-runtime --codex-bin codex.cmd
 ```
 
 ## Provider 配置
@@ -200,6 +287,33 @@ Google Sheets provider 约定：
 - `.codex-runtime/worker-*/task-*/workspace`: 每个任务的独立工作区
 - `.codex-runtime/worker-*/task-*/logs`: `codex` 标准输出、错误输出和最终摘要
 - `.codex-runtime/task-results/task-0001-*.json|txt`: 按 task 编号输出的结果摘要，里面会直接写明标题、详情、状态、worker、workspace、logs 路径
+
+## 故障排查
+
+### `sync once` / `sync loop` 报错
+
+优先检查：
+
+- `spreadsheet_url` 是否正确
+- `sheet_name` 是否和 Google Sheet 底部标签页名字一致
+- `service_account_file` 路径是否正确
+- service account 邮箱是否已加入表格共享成员
+
+### worker 没有执行任务
+
+优先检查：
+
+- `serve` 是否还在运行
+- `sync loop` 是否已经把任务导入到本地
+- `http://127.0.0.1:8000/api/tasks` 里是否存在 `未开始` 任务
+
+### Codex 连接慢或超时
+
+如果本机代理监听在 `7890`，启动 `pool` 时加：
+
+```powershell
+--proxy-url http://127.0.0.1:7890
+```
 
 ## 运行测试
 
