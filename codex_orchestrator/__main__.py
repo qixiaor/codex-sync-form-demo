@@ -59,6 +59,15 @@ def _add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--template-dir", default=".")
     parser.add_argument("--runtime-dir", default=".codex-runtime")
     parser.add_argument("--results-dir")
+    parser.add_argument("--agent-type", choices=["codex", "command-template"], default="codex")
+    parser.add_argument("--agent-bin")
+    parser.add_argument("--agent-model")
+    parser.add_argument("--agent-timeout-seconds", type=int)
+    parser.add_argument("--agent-command-template")
+    parser.add_argument("--agent-arg", action="append", default=[])
+    parser.add_argument("--agent-use-stdin", dest="agent_use_stdin", action="store_true")
+    parser.add_argument("--agent-no-stdin", dest="agent_use_stdin", action="store_false")
+    parser.set_defaults(agent_use_stdin=None)
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--codex-model")
     parser.add_argument("--lease-seconds", type=int, default=180)
@@ -102,6 +111,13 @@ def main() -> None:
             template_dir=Path(args.template_dir).resolve(),
             runtime_dir=runtime_dir,
             results_dir=results_dir,
+            agent_type=args.agent_type,
+            agent_bin=args.agent_bin,
+            agent_model=args.agent_model,
+            agent_timeout_seconds=args.agent_timeout_seconds,
+            agent_command_template=args.agent_command_template,
+            agent_use_stdin=args.agent_use_stdin,
+            agent_extra_args=args.agent_arg,
             codex_bin=args.codex_bin,
             codex_model=args.codex_model,
             lease_seconds=args.lease_seconds,
@@ -124,6 +140,13 @@ def main() -> None:
             template_dir=Path(args.template_dir).resolve(),
             runtime_dir=runtime_dir,
             results_dir=results_dir,
+            agent_type=args.agent_type,
+            agent_bin=args.agent_bin or args.codex_bin,
+            agent_model=args.agent_model if args.agent_model is not None else args.codex_model,
+            agent_timeout_seconds=args.agent_timeout_seconds or args.codex_timeout_seconds,
+            agent_command_template=args.agent_command_template,
+            agent_use_stdin=args.agent_use_stdin,
+            agent_extra_args=args.agent_arg,
             codex_bin=args.codex_bin,
             codex_model=args.codex_model,
             lease_seconds=args.lease_seconds,

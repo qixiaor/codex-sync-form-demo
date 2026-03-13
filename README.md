@@ -32,11 +32,11 @@
 2. `sync loop`
    在线表格同步进程，负责导入任务和回写状态
 3. `pool`
-   worker 池，负责启动多个独立 worker 和新的 `codex exec`
+   worker 池，负责启动多个独立 worker 和新的智能体 CLI 会话
 
 关系是：
 
-`在线表格 <-> sync loop <-> SQLite / 本地任务服务 <-> worker pool <-> codex exec`
+`在线表格 <-> sync loop <-> SQLite / 本地任务服务 <-> worker pool <-> agent CLI`
 
 并发控制只在本地 SQLite 里做。在线表格不负责抢任务。
 
@@ -266,11 +266,36 @@ python -m codex_orchestrator pool `
   --workers 3 `
   --template-dir . `
   --runtime-dir .codex-runtime `
+  --agent-type codex `
+  --agent-bin codex.cmd `
   --codex-bin codex.cmd `
   --server-timeout-seconds 10 `
   --codex-timeout-seconds 900 `
   --proxy-url http://127.0.0.1:7890
 ```
+
+如果你不用 Codex CLI，而是别的智能体 CLI，可以改成 `command-template` 模式。
+
+例如 Claude Code 风格命令模板：
+
+```powershell
+python -m codex_orchestrator pool `
+  --server-url http://127.0.0.1:8000 `
+  --workers 3 `
+  --template-dir . `
+  --runtime-dir .codex-runtime `
+  --agent-type command-template `
+  --agent-bin claude `
+  --agent-command-template '["{agent_bin}","--print","--cwd","{workspace_dir}","--prompt-file","{prompt_path}","--output","{final_message_path}"]' `
+  --agent-no-stdin `
+  --proxy-url http://127.0.0.1:7890
+```
+
+如果你不传 `--agent-command-template`，程序也会走默认兜底：
+
+- `claude` / `claude.exe` / `claude.cmd`：自动使用内置 Claude 模板
+- 其他未知 CLI：默认按 `可执行文件 + prompt 参数` 方式调用
+- 如果你显式传了 `--agent-use-stdin`，未知 CLI 会退化成只启动可执行文件本身，由 stdin 提供 prompt
 
 ## 同步输出说明
 
@@ -319,6 +344,28 @@ worker 不执行任务：
 Codex CLI 连接慢：
 
 - 启动 `pool` 时加 `--proxy-url http://127.0.0.1:7890`
+
+## 执行器参数
+
+worker / pool 现在支持两套参数：
+
+- 通用参数：`--agent-*`
+- 兼容旧参数：`--codex-*`
+
+推荐优先使用通用参数。
+
+常用通用参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--agent-type` | 执行模式，当前支持 `codex` 和 `command-template` |
+| `--agent-bin` | 智能体 CLI 可执行文件 |
+| `--agent-model` | 传给智能体 CLI 的模型名；只对支持模型参数的模板有意义 |
+| `--agent-timeout-seconds` | 单个任务最大执行时间 |
+| `--agent-command-template` | 自定义命令模板，支持 `{workspace_dir}`、`{prompt_path}`、`{final_message_path}`、`{prompt}`、`{model}`、`{title}`、`{detail}`、`{task_id}` |
+| `--agent-use-stdin` | 把任务提示词通过 stdin 传给 CLI |
+| `--agent-no-stdin` | 不走 stdin，由命令模板自己消费 `prompt_path` 或 `{prompt}` |
+| `--agent-arg` | 给智能体 CLI 追加额外参数，可重复传入 |
 
 ## 测试
 

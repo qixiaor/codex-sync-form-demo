@@ -12,6 +12,13 @@ def run_pool(
     template_dir: Path,
     runtime_dir: Path,
     results_dir: Path,
+    agent_type: str,
+    agent_bin: str,
+    agent_model: str | None,
+    agent_timeout_seconds: int,
+    agent_command_template: str | None,
+    agent_use_stdin: bool | None,
+    agent_extra_args: list[str],
     codex_bin: str,
     codex_model: str | None,
     lease_seconds: int,
@@ -32,6 +39,13 @@ def run_pool(
                 template_dir=template_dir,
                 runtime_dir=runtime_dir,
                 results_dir=results_dir,
+                agent_type=agent_type,
+                agent_bin=agent_bin,
+                agent_model=agent_model,
+                agent_timeout_seconds=agent_timeout_seconds,
+                agent_command_template=agent_command_template,
+                agent_use_stdin=agent_use_stdin,
+                agent_extra_args=agent_extra_args,
                 codex_bin=codex_bin,
                 codex_model=codex_model,
                 lease_seconds=lease_seconds,
@@ -56,6 +70,13 @@ def run_pool(
                     template_dir=template_dir,
                     runtime_dir=runtime_dir,
                     results_dir=results_dir,
+                    agent_type=agent_type,
+                    agent_bin=agent_bin,
+                    agent_model=agent_model,
+                    agent_timeout_seconds=agent_timeout_seconds,
+                    agent_command_template=agent_command_template,
+                    agent_use_stdin=agent_use_stdin,
+                    agent_extra_args=agent_extra_args,
                     codex_bin=codex_bin,
                     codex_model=codex_model,
                     lease_seconds=lease_seconds,
@@ -85,6 +106,13 @@ def _spawn_worker(
     template_dir: Path,
     runtime_dir: Path,
     results_dir: Path,
+    agent_type: str,
+    agent_bin: str,
+    agent_model: str | None,
+    agent_timeout_seconds: int,
+    agent_command_template: str | None,
+    agent_use_stdin: bool | None,
+    agent_extra_args: list[str],
     codex_bin: str,
     codex_model: str | None,
     lease_seconds: int,
@@ -120,9 +148,25 @@ def _spawn_worker(
         str(server_timeout_seconds),
         "--codex-timeout-seconds",
         str(codex_timeout_seconds),
-        "--codex-bin",
-        codex_bin,
+        "--agent-type",
+        agent_type,
+        "--agent-bin",
+        agent_bin,
+        "--agent-timeout-seconds",
+        str(agent_timeout_seconds),
     ]
+    if agent_model:
+        command.extend(["--agent-model", agent_model])
+    if agent_command_template:
+        command.extend(["--agent-command-template", agent_command_template])
+    if agent_use_stdin is True:
+        command.append("--agent-use-stdin")
+    elif agent_use_stdin is False:
+        command.append("--agent-no-stdin")
+    for arg in agent_extra_args:
+        command.extend(["--agent-arg", arg])
+    if codex_bin:
+        command.extend(["--codex-bin", codex_bin])
     if codex_model:
         command.extend(["--codex-model", codex_model])
     if proxy_url:

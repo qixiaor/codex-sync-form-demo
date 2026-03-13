@@ -20,8 +20,11 @@ from codex_orchestrator.sync_providers import (
 from codex_orchestrator.sync_service import sync_once
 from codex_orchestrator.worker import (
     WorkerConfig,
+    build_agent_command,
     build_codex_env,
     copy_template,
+    default_agent_command_template,
+    load_agent_command_template,
     resolve_codex_launcher,
     write_task_result,
 )
@@ -139,6 +142,88 @@ class TaskStoreTests(unittest.TestCase):
             env = build_codex_env(config)
         self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
 
+    def test_worker_config_keeps_legacy_codex_defaults(self) -> None:
+        config = WorkerConfig(
+            server_url="http://127.0.0.1:8000",
+            worker_id="worker-0",
+            template_dir=Path("."),
+            runtime_dir=Path(".codex-runtime"),
+            results_dir=Path(".codex-runtime/task-results"),
+            codex_bin="codex.cmd",
+            codex_model="gpt-5-codex",
+            codex_timeout_seconds=321,
+            codex_extra_args=["--foo"],
+        )
+        self.assertEqual("codex", config.agent_type)
+        self.assertEqual("codex.cmd", config.agent_bin)
+        self.assertEqual("gpt-5-codex", config.agent_model)
+        self.assertEqual(321, config.agent_timeout_seconds)
+        self.assertEqual(["--foo"], config.agent_extra_args)
+        self.assertTrue(config.agent_use_stdin)
+
+    def test_load_agent_command_template_accepts_json_array(self) -> None:
+        template = load_agent_command_template('["claude", "-p", "{prompt_path}"]')
+        self.assertEqual(["claude", "-p", "{prompt_path}"], template)
+
+    def test_build_agent_command_supports_command_template(self) -> None:
+        config = WorkerConfig(
+            server_url="http://127.0.0.1:8000",
+            worker_id="worker-0",
+            template_dir=Path("."),
+            runtime_dir=Path(".codex-runtime"),
+            results_dir=Path(".codex-runtime/task-results"),
+            agent_type="command-template",
+            agent_bin="claude",
+            agent_model="sonnet",
+            agent_command_template='["{agent_bin}", "--print", "--cwd", "{workspace_dir}", "--prompt-file", "{prompt_path}", "--output", "{final_message_path}", "--model", "{model}"]',
+            agent_extra_args=["--dangerously-skip-permissions"],
+            agent_use_stdin=False,
+        )
+        command = build_agent_command(
+            config=config,
+            task={"id": 7, "title": "demo", "detail": "detail"},
+            workspace_dir=Path("F:/tmp/workspace"),
+            final_message_path=Path("F:/tmp/final.txt"),
+            prompt_path=Path("F:/tmp/prompt.txt"),
+            prompt="hello",
+        )
+        self.assertEqual(
+            [
+                "claude",
+                "--print",
+                "--cwd",
+                str(Path("F:/tmp/workspace")),
+                "--prompt-file",
+                str(Path("F:/tmp/prompt.txt")),
+                "--output",
+                str(Path("F:/tmp/final.txt")),
+                "--model",
+                "sonnet",
+                "--dangerously-skip-permissions",
+            ],
+            command,
+        )
+
+    def test_default_agent_command_template_uses_claude_preset(self) -> None:
+        self.assertEqual(
+            [
+                "{agent_bin}",
+                "--print",
+                "--output-format",
+                "text",
+                "--cwd",
+                "{workspace_dir}",
+                "{prompt}",
+            ],
+            default_agent_command_template("claude"),
+        )
+
+    def test_default_agent_command_template_uses_generic_prompt_arg(self) -> None:
+        self.assertEqual(["{agent_bin}", "{prompt}"], default_agent_command_template("my-agent"))
+
+    def test_default_agent_command_template_uses_stdin_safe_fallback(self) -> None:
+        self.assertEqual(["{agent_bin}"], default_agent_command_template("my-agent", use_stdin=True))
+
     def test_apply_process_proxy_sets_environment(self) -> None:
         keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"]
         previous = {key: os.environ.get(key) for key in keys}
@@ -215,7 +300,77 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(task["id"], updated["id"])
             self.assertEqual("sheet task updated", updated["title"])
             self.assertEqual("detail 2", updated["detail"])
-            self.assertEqual("未开始", updated["status"])
+            self.assertEqual("已完成", updated["status"])
+
+    def test_upsert_external_task_reopens_completed_task_when_source_returns_to_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TaskStore(Path(tmpdir) / "tasks.db")
+            task = store.upsert_external_task(
+                source_name="sheet-demo",
+                source_task_key="2",
+                title="task",
+                detail="detail",
+                status="未开始",
+            )
+            claimed = store.claim_next_task("worker-a", lease_seconds=60)
+            self.assertIsNotNone(claimed)
+            completed = store.complete_task(int(task["id"]), "worker-a", "done")
+            self.assertIsNotNone(completed)
+            reopened = store.upsert_external_task(
+                source_name="sheet-demo",
+                source_task_key="2",
+                title="task reopened",
+                detail="detail reopened",
+                status="未开始",
+            )
+            self.assertEqual("未开始", reopened["status"])
+            self.assertIsNone(reopened["completed_at"])
+            self.assertIsNone(reopened["result_summary"])
+            self.assertEqual("task reopened", reopened["title"])
+
+    def test_upsert_external_task_can_mark_non_running_task_done_from_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TaskStore(Path(tmpdir) / "tasks.db")
+            task = store.upsert_external_task(
+                source_name="sheet-demo",
+                source_task_key="2",
+                title="task",
+                detail="detail",
+                status="未开始",
+            )
+            updated = store.upsert_external_task(
+                source_name="sheet-demo",
+                source_task_key="2",
+                title="task",
+                detail="detail",
+                status="已完成",
+            )
+            self.assertEqual(task["id"], updated["id"])
+            self.assertEqual("已完成", updated["status"])
+            self.assertIsNotNone(updated["completed_at"])
+            self.assertIsNone(updated["result_summary"])
+
+    def test_upsert_external_task_does_not_override_running_task_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TaskStore(Path(tmpdir) / "tasks.db")
+            store.upsert_external_task(
+                source_name="sheet-demo",
+                source_task_key="2",
+                title="task",
+                detail="detail",
+                status="未开始",
+            )
+            claimed = store.claim_next_task("worker-a", lease_seconds=60)
+            self.assertIsNotNone(claimed)
+            updated = store.upsert_external_task(
+                source_name="sheet-demo",
+                source_task_key="2",
+                title="task updated",
+                detail="detail updated",
+                status="已完成",
+            )
+            self.assertEqual("执行中", updated["status"])
+            self.assertEqual("worker-a", updated["claimed_by"])
 
     def test_sync_once_imports_and_pushes_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

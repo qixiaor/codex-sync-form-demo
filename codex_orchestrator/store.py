@@ -135,16 +135,48 @@ class TaskStore:
                 )
                 task_id = cursor.lastrowid
             else:
+                update_fields: list[str] = [
+                    "title = ?",
+                    "detail = ?",
+                    "source_updated_at = ?",
+                    "updated_at = ?",
+                ]
+                update_values: list[Any] = [title, detail, now, now]
+
+                if row["status"] != STATUS_RUNNING and status != row["status"]:
+                    if status == STATUS_PENDING:
+                        update_fields.extend(
+                            [
+                                "status = ?",
+                                "claimed_by = NULL",
+                                "lease_expires_at = NULL",
+                                "result_summary = NULL",
+                                "last_error = NULL",
+                                "completed_at = NULL",
+                            ]
+                        )
+                        update_values.append(status)
+                    elif status == STATUS_DONE:
+                        update_fields.extend(
+                            [
+                                "status = ?",
+                                "claimed_by = NULL",
+                                "lease_expires_at = NULL",
+                                "result_summary = NULL",
+                                "last_error = NULL",
+                                "completed_at = ?",
+                            ]
+                        )
+                        update_values.extend([status, now])
+
+                update_values.append(row["id"])
                 conn.execute(
-                    """
+                    f"""
                     UPDATE tasks
-                    SET title = ?,
-                        detail = ?,
-                        source_updated_at = ?,
-                        updated_at = ?
+                    SET {", ".join(update_fields)}
                     WHERE id = ?
                     """,
-                    (title, detail, now, now, row["id"]),
+                    tuple(update_values),
                 )
                 task_id = row["id"]
             task = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
