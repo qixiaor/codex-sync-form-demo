@@ -8,10 +8,14 @@ from unittest import mock
 from codex_orchestrator.network import apply_process_proxy
 from codex_orchestrator.store import TaskStore
 from codex_orchestrator.sync_providers import (
+    DingTalkBaseProvider,
     GoogleSheetsProvider,
     ProviderConfig,
     SourceTask,
     _resolve_spreadsheet_id,
+    _prioritize_available_tools,
+    _tool_aliases,
+    _unwrap_dingtalk_mcp_payload,
 )
 from codex_orchestrator.sync_service import sync_once
 from codex_orchestrator.worker import (
@@ -231,12 +235,34 @@ class TaskStoreTests(unittest.TestCase):
             ):
                 result = sync_once(db_path, Path(tmpdir) / "provider.json")
 
-            self.assertEqual({"imported": 2, "updated": 2}, result)
+            self.assertEqual({"imported": 2, "updated": 2, "writeback_errors": 0}, result)
             store = TaskStore(db_path)
             tasks = store.list_tasks_for_source("sheet-demo")
             self.assertEqual(2, len(tasks))
             provider.update_status.assert_any_call("2", "未开始")
             provider.update_status.assert_any_call("3", "未开始")
+
+    def test_sync_once_continues_after_single_writeback_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "tasks.db"
+
+            provider = mock.Mock()
+            provider.name = "sheet-demo"
+            provider.can_write = True
+            provider.list_tasks.return_value = [
+                SourceTask(source_task_key="2", title="task a", detail="detail a", status="未开始"),
+                SourceTask(source_task_key="3", title="task b", detail="detail b", status="未开始"),
+            ]
+            provider.update_status.side_effect = [RuntimeError("boom"), None]
+
+            with mock.patch("codex_orchestrator.sync_service.load_provider_config"), mock.patch(
+                "codex_orchestrator.sync_service.create_provider",
+                return_value=provider,
+            ), mock.patch("sys.stderr"):
+                result = sync_once(db_path, Path(tmpdir) / "provider.json")
+
+            self.assertEqual({"imported": 2, "updated": 1, "writeback_errors": 1}, result)
+            self.assertEqual(2, provider.update_status.call_count)
 
     def test_resolve_spreadsheet_id_from_share_url(self) -> None:
         spreadsheet_id = _resolve_spreadsheet_id(
@@ -276,6 +302,38 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual("api-key", provider.api_key)
         self.assertFalse(provider.can_write)
 
+    def test_google_provider_normalizes_status_alias(self) -> None:
+        provider = GoogleSheetsProvider(
+            ProviderConfig(
+                provider="google-sheets",
+                name="sheet-demo",
+                options={
+                    "spreadsheet_id": "sheet-id",
+                    "sheet_name": "Sheet1",
+                    "api_key": "api-key",
+                },
+            )
+        )
+        with mock.patch.object(
+            provider,
+            "_request_json",
+            return_value={
+                "values": [
+                    ["标题", "任务详情", "状态"],
+                    ["任务一", "详情一", "未完成"],
+                    ["任务二", "详情二", "进行中"],
+                ]
+            },
+        ):
+            tasks = provider.list_tasks()
+        self.assertEqual(
+            [
+                SourceTask(source_task_key="2", title="任务一", detail="详情一", status="未开始"),
+                SourceTask(source_task_key="3", title="任务二", detail="详情二", status="执行中"),
+            ],
+            tasks,
+        )
+
     def test_google_provider_uses_service_account_file(self) -> None:
         credentials = mock.Mock()
         credentials.valid = False
@@ -310,6 +368,156 @@ class TaskStoreTests(unittest.TestCase):
         credentials_builder.assert_called_once()
         credentials.refresh.assert_called_once()
         self.assertTrue(provider.can_write)
+
+    def test_dingtalk_base_provider_lists_tasks_with_pagination(self) -> None:
+        with mock.patch(
+            "codex_orchestrator.sync_providers._call_mcp_tool_with_fallbacks",
+            side_effect=[
+                {
+                    "success": True,
+                    "result": {
+                        "hasMore": True,
+                        "cursor": "next-page",
+                        "records": [
+                            {
+                                "id": "record-1",
+                                "fields": {
+                                    "标题": "任务一",
+                                    "任务详情": "详情一",
+                                    "状态": "未开始",
+                                },
+                            }
+                        ],
+                    },
+                },
+                {
+                    "success": True,
+                    "result": {
+                        "hasMore": False,
+                        "cursor": "",
+                        "records": [
+                            {
+                                "id": "record-2",
+                                "fields": {
+                                    "标题": "任务二",
+                                    "任务详情": "详情二",
+                                    "状态": "未完成",
+                                },
+                            }
+                        ],
+                    },
+                },
+            ],
+        ) as call_mcp_tool:
+            provider = DingTalkBaseProvider(
+                ProviderConfig(
+                    provider="dingtalk-base",
+                    name="dingtalk-demo",
+                    options={
+                        "mcp_url": "https://example.com/mcp",
+                        "dentry_uuid": "doc-id",
+                        "sheet_id_or_name": "Sheet1",
+                    },
+                )
+            )
+            tasks = provider.list_tasks()
+
+        self.assertEqual(
+            [
+                SourceTask(source_task_key="record-1", title="任务一", detail="详情一", status="未开始"),
+                SourceTask(source_task_key="record-2", title="任务二", detail="详情二", status="未开始"),
+            ],
+            tasks,
+        )
+        self.assertEqual(2, call_mcp_tool.call_count)
+        self.assertEqual("search_base_record", provider.search_tool_name)
+        self.assertEqual(
+            mock.call(
+                server_url="https://example.com/mcp",
+                tool_names=["search_base_record", "search_base_records"],
+                arguments={"dentryUuid": "doc-id", "sheetIdOrName": "Sheet1"},
+                timeout_seconds=30,
+            ),
+            call_mcp_tool.call_args_list[0],
+        )
+        self.assertEqual(
+            mock.call(
+                server_url="https://example.com/mcp",
+                tool_names=["search_base_record", "search_base_records"],
+                arguments={"dentryUuid": "doc-id", "sheetIdOrName": "Sheet1", "cursor": "next-page"},
+                timeout_seconds=30,
+            ),
+            call_mcp_tool.call_args_list[1],
+        )
+
+    def test_dingtalk_base_provider_updates_status(self) -> None:
+        with mock.patch(
+            "codex_orchestrator.sync_providers._call_mcp_tool_with_fallbacks",
+            return_value={"success": True, "result": [{"id": "record-1"}]},
+        ) as call_mcp_tool:
+            provider = DingTalkBaseProvider(
+                ProviderConfig(
+                    provider="dingtalk-base",
+                    name="dingtalk-demo",
+                    options={
+                        "mcp_url": "https://example.com/mcp",
+                        "dentry_uuid": "doc-id",
+                        "sheet_id_or_name": "Sheet1",
+                    },
+                )
+            )
+            provider.update_status("record-1", "已完成")
+
+        call_mcp_tool.assert_called_once_with(
+            server_url="https://example.com/mcp",
+            tool_names=["update_records", "update_base_record", "update_base_records"],
+            arguments={
+                "dentryUuid": "doc-id",
+                "sheetIdOrName": "Sheet1",
+                "recordIds": [{"id": "record-1", "fields": {"状态": "已完成"}}],
+            },
+            timeout_seconds=30,
+        )
+
+    def test_dingtalk_tool_aliases_include_singular_plural_pairs(self) -> None:
+        self.assertEqual(["search_base_record", "search_base_records"], _tool_aliases("search_base_record"))
+        self.assertEqual(["search_base_records", "search_base_record"], _tool_aliases("search_base_records"))
+        self.assertEqual(
+            ["update_base_record", "update_base_records", "update_records"],
+            _tool_aliases("update_base_record"),
+        )
+        self.assertEqual(
+            ["update_records", "update_base_record", "update_base_records"],
+            _tool_aliases("update_records"),
+        )
+
+    def test_prioritize_available_tools_prefers_server_listed_name(self) -> None:
+        self.assertEqual(
+            ["search_base_records", "search_base_record"],
+            _prioritize_available_tools(
+                ["search_base_record", "search_base_records"],
+                {"search_base_records"},
+            ),
+        )
+
+    def test_dingtalk_base_provider_can_disable_writeback(self) -> None:
+        provider = DingTalkBaseProvider(
+            ProviderConfig(
+                provider="dingtalk-base",
+                name="dingtalk-demo",
+                options={
+                    "mcp_url": "https://example.com/mcp",
+                    "dentry_uuid": "doc-id",
+                    "sheet_id_or_name": "Sheet1",
+                    "write_enabled": False,
+                },
+            )
+        )
+        self.assertFalse(provider.can_write)
+
+    def test_unwrap_dingtalk_payload_accepts_success_with_list_result(self) -> None:
+        result = _unwrap_dingtalk_mcp_payload({"success": True, "result": [{"id": "record-1"}]})
+        self.assertEqual([{"id": "record-1"}], result)
 
     def test_sync_loop_keeps_running_after_failure(self) -> None:
         from codex_orchestrator import sync_service

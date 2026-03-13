@@ -1,0 +1,15 @@
+{
+  "provider": "dingtalk-base",
+  "name": "无标题表格",
+  "mcp_url": "https://mcp.api-inference.modelscope.net/4ffd90bb56e447/mcp",
+  "dentry_uuid": "1DKw2zgV2PpdzzQ1SBzpZPGL8B5r9YAn",
+  "sheet_id_or_name": "Sheet1",
+  "title_field": "标题",
+  "detail_field": "任务详情",
+  "status_field": "状态",
+  "status_aliases": {
+    "未完成": "未开始"
+  },
+  "write_enabled": true,
+  "timeout_seconds": 30
+}

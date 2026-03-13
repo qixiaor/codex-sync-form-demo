@@ -21,6 +21,7 @@ def sync_once(
 def _sync_with_provider(store: TaskStore, provider: SyncProvider) -> dict[str, int]:
     imported = 0
     updated = 0
+    writeback_errors = 0
 
     for source_task in provider.list_tasks():
         store.upsert_external_task(
@@ -34,10 +35,18 @@ def _sync_with_provider(store: TaskStore, provider: SyncProvider) -> dict[str, i
 
     if provider.can_write:
         for task in store.list_tasks_for_source(provider.name):
-            provider.update_status(str(task["source_task_key"]), str(task["status"]))
-            updated += 1
+            try:
+                provider.update_status(str(task["source_task_key"]), str(task["status"]))
+                updated += 1
+            except Exception as exc:
+                writeback_errors += 1
+                print(
+                    f"sync writeback failed: source={provider.name} "
+                    f"task_key={task['source_task_key']} status={task['status']} error={exc}",
+                    file=sys.stderr,
+                )
 
-    return {"imported": imported, "updated": updated}
+    return {"imported": imported, "updated": updated, "writeback_errors": writeback_errors}
 
 
 def sync_loop(db_path: str | Path, config_path: str | Path, interval_seconds: int) -> None:
@@ -48,7 +57,8 @@ def sync_loop(db_path: str | Path, config_path: str | Path, interval_seconds: in
             result = _sync_with_provider(store, provider)
             print(
                 f"sync completed: imported={result['imported']} "
-                f"updated={result['updated']} config={config_path}"
+                f"updated={result['updated']} "
+                f"writeback_errors={result['writeback_errors']} config={config_path}"
             )
         except Exception as exc:
             print(f"sync failed: config={config_path} error={exc}", file=sys.stderr)

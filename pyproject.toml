@@ -10,3 +10,4 @@ requires-python = ">=3.10"
 
 [project.optional-dependencies]
 google = ["google-auth>=2.0"]
+dingtalk = ["mcp>=1.10.0"]

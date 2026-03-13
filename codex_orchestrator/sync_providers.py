@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 from urllib import error, parse, request
@@ -37,6 +38,8 @@ def load_provider_config(path: str) -> ProviderConfig:
 def create_provider(config: ProviderConfig) -> "SyncProvider":
     if config.provider == "google-sheets":
         return GoogleSheetsProvider(config)
+    if config.provider == "dingtalk-base":
+        return DingTalkBaseProvider(config)
     if config.provider == "generic-json":
         return GenericJsonProvider(config)
     raise ValueError(f"unsupported provider: {config.provider}")
@@ -71,6 +74,7 @@ class GoogleSheetsProvider(SyncProvider):
         self.timeout_seconds = int(config.options.get("timeout_seconds", 30))
         self.read_range = str(config.options.get("read_range", f"{_quote_sheet_name(self.sheet_name)}!A:C"))
         self.status_column = str(config.options.get("status_column", "C"))
+        self.status_aliases = _build_status_aliases(config.options)
 
     @property
     def can_write(self) -> bool:
@@ -95,7 +99,7 @@ class GoogleSheetsProvider(SyncProvider):
             values = list(row) + ["", "", ""]
             title = str(values[0]).strip()
             detail = str(values[1]).strip()
-            status = str(values[2]).strip() or STATUS_PENDING
+            status = _normalize_status(str(values[2]).strip(), self.status_aliases)
             if not title and not detail and not status:
                 continue
             if status not in VALID_STATUSES:
@@ -161,6 +165,113 @@ class GoogleSheetsProvider(SyncProvider):
         return token
 
 
+class DingTalkBaseProvider(SyncProvider):
+    def __init__(self, config: ProviderConfig) -> None:
+        super().__init__(config)
+        options = config.options
+        self.mcp_url = _required(options, "mcp_url")
+        self.dentry_uuid = _required(options, "dentry_uuid")
+        self.sheet_id_or_name = str(options.get("sheet_id_or_name", "Sheet1")).strip() or "Sheet1"
+        self.title_field = str(options.get("title_field", "标题")).strip() or "标题"
+        self.detail_field = str(options.get("detail_field", "任务详情")).strip() or "任务详情"
+        self.status_field = str(options.get("status_field", "状态")).strip() or "状态"
+        self.timeout_seconds = int(options.get("timeout_seconds", 30))
+        self.write_enabled = _as_bool(options.get("write_enabled", True))
+        self.status_aliases = _build_status_aliases(options)
+        self.search_tool_name = str(options.get("search_tool_name", "search_base_record")).strip() or "search_base_record"
+        self.update_tool_name = str(options.get("update_tool_name", "update_records")).strip() or "update_records"
+        self.record_fields_key = str(options.get("record_fields_key", "fields")).strip() or "fields"
+        self.record_id_key = str(options.get("record_id_key", "id")).strip() or "id"
+        self.record_id_arg_name = str(options.get("record_id_arg_name", "recordId")).strip() or "recordId"
+        self.fields_arg_name = str(options.get("fields_arg_name", "fields")).strip() or "fields"
+        self.update_records_arg_name = str(options.get("update_records_arg_name", "recordIds")).strip() or "recordIds"
+
+    @property
+    def can_write(self) -> bool:
+        return self.write_enabled
+
+    def list_tasks(self) -> list[SourceTask]:
+        cursor = ""
+        tasks: list[SourceTask] = []
+        while True:
+            arguments = {
+                "dentryUuid": self.dentry_uuid,
+                "sheetIdOrName": self.sheet_id_or_name,
+            }
+            if cursor:
+                arguments["cursor"] = cursor
+            payload = _call_mcp_tool_with_fallbacks(
+                server_url=self.mcp_url,
+                tool_names=_tool_aliases(self.search_tool_name),
+                arguments=arguments,
+                timeout_seconds=self.timeout_seconds,
+            )
+            result = _unwrap_dingtalk_mcp_payload(payload)
+            records = result.get("records", [])
+            if not isinstance(records, list):
+                raise ValueError("dingtalk-base search result must contain a records list")
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                record_id = str(record.get("id", "")).strip()
+                if not record_id:
+                    continue
+                fields = record.get(self.record_fields_key, record.get("fields", {}))
+                if not isinstance(fields, dict):
+                    continue
+                title = str(fields.get(self.title_field, "")).strip()
+                detail = str(fields.get(self.detail_field, "")).strip()
+                status = _normalize_status(str(fields.get(self.status_field, "")).strip(), self.status_aliases)
+                if not title and not detail and not status:
+                    continue
+                if status not in VALID_STATUSES:
+                    continue
+                tasks.append(
+                    SourceTask(
+                        source_task_key=record_id,
+                        title=title,
+                        detail=detail,
+                        status=status,
+                    )
+                )
+            has_more = bool(result.get("hasMore"))
+            cursor = str(result.get("cursor", "") or "").strip()
+            if not has_more:
+                break
+        return tasks
+
+    def update_status(self, source_task_key: str, status: str) -> None:
+        if status not in VALID_STATUSES:
+            raise ValueError(f"invalid status: {status}")
+        arguments = self._build_update_arguments(source_task_key, status)
+        payload = _call_mcp_tool_with_fallbacks(
+            server_url=self.mcp_url,
+            tool_names=_tool_aliases(self.update_tool_name),
+            arguments=arguments,
+            timeout_seconds=self.timeout_seconds,
+        )
+        _unwrap_dingtalk_mcp_payload(payload)
+
+    def _build_update_arguments(self, source_task_key: str, status: str) -> dict[str, Any]:
+        base_arguments: dict[str, Any] = {
+            "dentryUuid": self.dentry_uuid,
+            "sheetIdOrName": self.sheet_id_or_name,
+        }
+        fields = {self.status_field: status}
+        if self.update_tool_name == "update_records":
+            base_arguments[self.update_records_arg_name] = [
+                {
+                    self.record_id_key: source_task_key,
+                    self.fields_arg_name: fields,
+                }
+            ]
+            return base_arguments
+
+        base_arguments[self.record_id_arg_name] = source_task_key
+        base_arguments[self.fields_arg_name] = fields
+        return base_arguments
+
+
 class GenericJsonProvider(SyncProvider):
     def __init__(self, config: ProviderConfig) -> None:
         super().__init__(config)
@@ -175,6 +286,7 @@ class GenericJsonProvider(SyncProvider):
         self.detail_field = str(options.get("detail_field", "detail"))
         self.status_field = str(options.get("status_field", "status"))
         self.headers = {str(key): str(value) for key, value in options.get("headers", {}).items()}
+        self.status_aliases = _build_status_aliases(options)
 
     @property
     def can_write(self) -> bool:
@@ -189,7 +301,7 @@ class GenericJsonProvider(SyncProvider):
         for item in items:
             title = str(item.get(self.title_field, "")).strip()
             detail = str(item.get(self.detail_field, "")).strip()
-            status = str(item.get(self.status_field, "")).strip() or STATUS_PENDING
+            status = _normalize_status(str(item.get(self.status_field, "")).strip(), self.status_aliases)
             if status not in VALID_STATUSES:
                 continue
             tasks.append(
@@ -229,6 +341,40 @@ def _required(payload: dict[str, Any], key: str) -> str:
     if not value:
         raise ValueError(f"{key} is required")
     return value
+
+
+def _build_status_aliases(options: dict[str, Any]) -> dict[str, str]:
+    aliases = {
+        "未完成": STATUS_PENDING,
+        "待开始": STATUS_PENDING,
+        "进行中": "执行中",
+        "处理中": "执行中",
+        "完成": "已完成",
+    }
+    raw = options.get("status_aliases", {})
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            source = str(key).strip()
+            target = str(value).strip()
+            if source and target:
+                aliases[source] = target
+    return aliases
+
+
+def _normalize_status(status: str, aliases: dict[str, str]) -> str:
+    status = status.strip()
+    if not status:
+        return STATUS_PENDING
+    return aliases.get(status, status)
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"0", "false", "no", "off", ""}:
+        return False
+    return True
 
 
 def _resolve_direct_access_token(options: dict[str, Any]) -> str:
@@ -340,3 +486,182 @@ def _replace_env_tokens(text: str) -> str:
         return os.environ.get(match.group(1), "")
 
     return re.sub(r"\$\{([A-Z0-9_]+)\}", repl, text)
+
+
+def _unwrap_dingtalk_mcp_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        raise ValueError("dingtalk-base MCP response must be a JSON object")
+    success = payload.get("success")
+    if success is False:
+        raise RuntimeError(
+            f"dingtalk-base MCP tool failed: errorCode={payload.get('errorCode')} "
+            f"errorMsg={payload.get('errorMsg')}"
+        )
+    result = payload.get("result")
+    if result is None:
+        raise ValueError(f"dingtalk-base MCP response must contain a result field: {json.dumps(payload, ensure_ascii=False)}")
+    return result
+
+
+def _call_mcp_tool(
+    server_url: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    return asyncio.run(
+        asyncio.wait_for(
+            _call_mcp_tool_async(
+                server_url=server_url,
+                tool_name=tool_name,
+                arguments=arguments,
+            ),
+            timeout=timeout_seconds,
+        )
+    )
+
+
+def _call_mcp_tool_with_fallbacks(
+    server_url: str,
+    tool_names: list[str],
+    arguments: dict[str, Any],
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    return asyncio.run(
+        asyncio.wait_for(
+            _call_mcp_tool_with_fallbacks_async(
+                server_url=server_url,
+                tool_names=tool_names,
+                arguments=arguments,
+            ),
+            timeout=timeout_seconds,
+        )
+    )
+
+
+async def _call_mcp_tool_async(
+    server_url: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    ClientSession, streamable_http_client = _load_mcp_client()
+    async with streamable_http_client(server_url) as (read_stream, write_stream, _):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            result = await session.call_tool(tool_name, arguments=arguments)
+            return _parse_mcp_call_result(result)
+
+
+async def _call_mcp_tool_with_fallbacks_async(
+    server_url: str,
+    tool_names: list[str],
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    ClientSession, streamable_http_client = _load_mcp_client()
+    async with streamable_http_client(server_url) as (read_stream, write_stream, _):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            available_tools = await _list_mcp_tool_names(session)
+            names_to_try = _prioritize_available_tools(tool_names, available_tools)
+            last_error: Exception | None = None
+            for tool_name in names_to_try:
+                try:
+                    result = await session.call_tool(tool_name, arguments=arguments)
+                    return _parse_mcp_call_result(result)
+                except Exception as exc:
+                    last_error = exc
+            available_text = ", ".join(sorted(available_tools)) if available_tools else "(server did not return any tools)"
+            wanted_text = ", ".join(tool_names)
+            if last_error is None:
+                raise RuntimeError(
+                    f"MCP tool not available. wanted=[{wanted_text}] available=[{available_text}]"
+                )
+            raise RuntimeError(
+                f"MCP tool call failed. wanted=[{wanted_text}] available=[{available_text}] last_error={last_error}"
+            ) from last_error
+
+
+def _load_mcp_client() -> tuple[Any, Any]:
+    try:
+        from mcp import ClientSession
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "mcp is required for dingtalk-base provider. "
+            "Install it with: python -m pip install mcp"
+        ) from exc
+
+    try:
+        from mcp.client.streamable_http import streamable_http_client
+    except ImportError:
+        try:
+            from mcp.client.streamablehttp_client import streamablehttp_client as streamable_http_client
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "mcp streamable HTTP client is unavailable. "
+                "Upgrade MCP SDK with: python -m pip install -U mcp"
+            ) from exc
+    return ClientSession, streamable_http_client
+
+
+def _parse_mcp_call_result(result: Any) -> dict[str, Any]:
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict):
+        return structured
+
+    for content in getattr(result, "content", []):
+        text = getattr(content, "text", None)
+        if isinstance(text, str) and text.strip():
+            parsed = _try_parse_json(text)
+            if isinstance(parsed, dict):
+                return parsed
+
+    raise ValueError("MCP tool did not return JSON content")
+
+
+def _try_parse_json(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"failed to parse MCP JSON response: {exc}") from exc
+
+
+async def _list_mcp_tool_names(session: Any) -> set[str]:
+    listing = await session.list_tools()
+    tools = getattr(listing, "tools", None)
+    if not isinstance(tools, list):
+        return set()
+    names: set[str] = set()
+    for tool in tools:
+        name = getattr(tool, "name", None)
+        if isinstance(name, str) and name.strip():
+            names.add(name.strip())
+    return names
+
+
+def _tool_aliases(tool_name: str) -> list[str]:
+    tool_name = tool_name.strip()
+    aliases = [tool_name]
+    if tool_name == "search_base_record":
+        aliases.append("search_base_records")
+    elif tool_name == "search_base_records":
+        aliases.append("search_base_record")
+    elif tool_name == "update_base_records":
+        aliases.append("update_base_record")
+    elif tool_name == "update_base_record":
+        aliases.append("update_base_records")
+        aliases.append("update_records")
+    elif tool_name == "update_records":
+        aliases.append("update_base_record")
+        aliases.append("update_base_records")
+    return aliases
+
+
+def _prioritize_available_tools(tool_names: list[str], available_tools: set[str]) -> list[str]:
+    present = [tool_name for tool_name in tool_names if tool_name in available_tools]
+    missing = [tool_name for tool_name in tool_names if tool_name not in available_tools]
+    ordered = present + missing
+    deduped: list[str] = []
+    for tool_name in ordered:
+        if tool_name not in deduped:
+            deduped.append(tool_name)
+    return deduped
