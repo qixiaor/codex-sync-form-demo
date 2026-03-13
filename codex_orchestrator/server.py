@@ -6,7 +6,7 @@ from html import escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .store import TaskStore
 
@@ -17,7 +17,10 @@ class TaskRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self._write_html(self._render_home())
+            query = parse_qs(parsed.query)
+            message = query.get("message", [""])[0]
+            error = query.get("error", [""])[0]
+            self._write_html(self._render_home(message=message, error=error))
             return
         if parsed.path == "/api/tasks":
             self._write_json({"tasks": self.server.store.list_tasks()})
@@ -30,6 +33,26 @@ class TaskRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/admin/delete":
+                form = self._read_form()
+                task_id = int(self._required_text(form, "task_id"))
+                deleted = self.server.store.delete_task(task_id)
+                if not deleted:
+                    self._redirect_home(error=f"task {task_id} not found")
+                    return
+                self._redirect_home(message=f"deleted task {task_id}")
+                return
+            if parsed.path == "/admin/reset":
+                form = self._read_form()
+                scope = str(form.get("scope", "")).strip()
+                source_name = str(form.get("source_name", "")).strip()
+                if scope == "source" and source_name:
+                    deleted_count = self.server.store.reset_tasks(source_name=source_name)
+                    self._redirect_home(message=f"deleted {deleted_count} tasks from source {source_name}")
+                    return
+                deleted_count = self.server.store.reset_tasks()
+                self._redirect_home(message=f"deleted {deleted_count} tasks from all sources")
+                return
             body = self._read_json()
             if parsed.path == "/api/tasks":
                 title = self._required_text(body, "title")
@@ -75,6 +98,12 @@ class TaskRequestHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(content_length)
         return json.loads(raw.decode("utf-8"))
 
+    def _read_form(self) -> dict[str, str]:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw = self.rfile.read(content_length).decode("utf-8") if content_length else ""
+        parsed = parse_qs(raw, keep_blank_values=True)
+        return {key: values[0] if values else "" for key, values in parsed.items()}
+
     def _write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
@@ -90,6 +119,19 @@ class TaskRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _redirect_home(self, message: str = "", error: str = "") -> None:
+        location = "/"
+        params = []
+        if message:
+            params.append(f"message={_quote_query(message)}")
+        if error:
+            params.append(f"error={_quote_query(error)}")
+        if params:
+            location = f"/?{'&'.join(params)}"
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.end_headers()
 
     def _write_tsv(self) -> None:
         tasks = self.server.store.list_tasks()
@@ -108,18 +150,37 @@ class TaskRequestHandler(BaseHTTPRequestHandler):
             raise ValueError(f"{key} is required")
         return value
 
-    def _render_home(self) -> str:
+    def _render_home(self, message: str = "", error: str = "") -> str:
+        tasks = self.server.store.list_tasks()
+        sources = self.server.store.list_sources()
         rows = []
-        for task in self.server.store.list_tasks():
+        for task in tasks:
+            source_name = task.get("source_name") or "-"
             rows.append(
                 "<tr>"
                 f"<td>{task['id']}</td>"
+                f"<td>{escape(source_name)}</td>"
                 f"<td>{escape(task['title'])}</td>"
                 f"<td>{escape(task['detail'])}</td>"
                 f"<td>{escape(task['status'])}</td>"
+                "<td>"
+                "<form method='post' action='/admin/delete' onsubmit='return confirm(\"确认删除这条本地任务？\")'>"
+                f"<input type='hidden' name='task_id' value='{task['id']}'>"
+                "<button type='submit'>删除</button>"
+                "</form>"
+                "</td>"
                 "</tr>"
             )
-        body = "".join(rows) or "<tr><td colspan='4'>no tasks</td></tr>"
+        body = "".join(rows) or "<tr><td colspan='6'>no tasks</td></tr>"
+        source_options = "".join(
+            f"<option value='{escape(source)}'>{escape(source)}</option>"
+            for source in sources
+        )
+        notice_html = ""
+        if message:
+            notice_html += f"<div class='notice ok'>{escape(message)}</div>"
+        if error:
+            notice_html += f"<div class='notice error'>{escape(error)}</div>"
         return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -127,17 +188,49 @@ class TaskRequestHandler(BaseHTTPRequestHandler):
   <title>Codex Task Board</title>
   <style>
     body {{ font-family: Consolas, monospace; padding: 24px; }}
+    .toolbar {{ display: flex; gap: 16px; flex-wrap: wrap; margin: 16px 0 24px; }}
+    .card {{ border: 1px solid #999; padding: 12px; min-width: 280px; background: #fafafa; }}
+    .notice {{ padding: 10px 12px; margin: 0 0 16px; border: 1px solid #999; }}
+    .notice.ok {{ background: #eef8ee; border-color: #77aa77; }}
+    .notice.error {{ background: #fff1f1; border-color: #cc7777; }}
     table {{ border-collapse: collapse; width: 100%; }}
     th, td {{ border: 1px solid #999; padding: 8px; vertical-align: top; }}
     th {{ background: #f5f5f5; text-align: left; }}
+    button {{ cursor: pointer; }}
+    select, button {{ font: inherit; }}
+    .danger {{ color: #8b0000; }}
   </style>
 </head>
 <body>
   <h1>Codex Task Board</h1>
   <p>A1-C1 固定为：标题 / 任务详情 / 状态</p>
   <p>API: <code>/api/tasks</code>, <code>/api/tasks/claim</code>, <code>/table.tsv</code></p>
+  {notice_html}
+  <div class="toolbar">
+    <div class="card">
+      <strong>按来源清空</strong>
+      <form method="post" action="/admin/reset" onsubmit="return confirm('确认删除这个来源的所有本地任务？')">
+        <input type="hidden" name="scope" value="source">
+        <p>
+          <select name="source_name" {'disabled' if not sources else ''}>
+            <option value="">选择来源</option>
+            {source_options}
+          </select>
+        </p>
+        <button type="submit" {'disabled' if not sources else ''}>清空来源任务</button>
+      </form>
+    </div>
+    <div class="card danger">
+      <strong>整表重置</strong>
+      <form method="post" action="/admin/reset" onsubmit="return confirm('确认删除本地 SQLite 中的全部任务？')">
+        <input type="hidden" name="scope" value="all">
+        <p>这不会直接删除在线表格，但下次 `sync` 会重新导入在线任务。</p>
+        <button type="submit">清空本地任务表</button>
+      </form>
+    </div>
+  </div>
   <table>
-    <thead><tr><th>ID</th><th>标题</th><th>任务详情</th><th>状态</th></tr></thead>
+    <thead><tr><th>ID</th><th>来源</th><th>标题</th><th>任务详情</th><th>状态</th><th>操作</th></tr></thead>
     <tbody>{body}</tbody>
   </table>
 </body>
@@ -155,3 +248,7 @@ def serve_forever(host: str, port: int, db_path: str) -> None:
     server = TaskHTTPServer((host, port), store)
     print(f"task server listening on http://{host}:{port}")
     server.serve_forever()
+
+
+def _quote_query(text: str) -> str:
+    return quote(text, safe="")

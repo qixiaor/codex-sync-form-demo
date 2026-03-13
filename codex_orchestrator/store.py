@@ -196,6 +196,19 @@ class TaskStore:
             ).fetchall()
         return [self._row_to_dict(row) for row in rows]
 
+    def list_sources(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT source_name
+                FROM tasks
+                WHERE source_name IS NOT NULL
+                  AND TRIM(source_name) != ''
+                ORDER BY source_name
+                """
+            ).fetchall()
+        return [str(row["source_name"]) for row in rows]
+
     def list_tasks(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM tasks ORDER BY id").fetchall()
@@ -334,6 +347,19 @@ class TaskStore:
             row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             conn.execute("COMMIT")
         return self._row_to_dict(row)
+
+    def delete_task(self, task_id: int) -> bool:
+        with self._connect() as conn:
+            result = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        return result.rowcount == 1
+
+    def reset_tasks(self, source_name: str | None = None) -> int:
+        with self._connect() as conn:
+            if source_name and source_name.strip():
+                result = conn.execute("DELETE FROM tasks WHERE source_name = ?", (source_name.strip(),))
+            else:
+                result = conn.execute("DELETE FROM tasks")
+        return int(result.rowcount)
 
     def _requeue_expired_locked(self, conn: sqlite3.Connection, now: datetime) -> None:
         conn.execute(

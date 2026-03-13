@@ -372,6 +372,34 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual("执行中", updated["status"])
             self.assertEqual("worker-a", updated["claimed_by"])
 
+    def test_delete_task_removes_single_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TaskStore(Path(tmpdir) / "tasks.db")
+            task = store.add_task("title", "detail")
+            deleted = store.delete_task(int(task["id"]))
+            self.assertTrue(deleted)
+            self.assertIsNone(store.get_task(int(task["id"])))
+
+    def test_reset_tasks_can_clear_by_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TaskStore(Path(tmpdir) / "tasks.db")
+            store.upsert_external_task("source-a", "1", "task1", "detail1", "未开始")
+            store.upsert_external_task("source-a", "2", "task2", "detail2", "未开始")
+            store.upsert_external_task("source-b", "1", "task3", "detail3", "未开始")
+            deleted_count = store.reset_tasks(source_name="source-a")
+            self.assertEqual(2, deleted_count)
+            self.assertEqual(["source-b"], store.list_sources())
+            self.assertEqual(1, len(store.list_tasks()))
+
+    def test_reset_tasks_can_clear_all(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TaskStore(Path(tmpdir) / "tasks.db")
+            store.add_task("title1", "detail1")
+            store.add_task("title2", "detail2")
+            deleted_count = store.reset_tasks()
+            self.assertEqual(2, deleted_count)
+            self.assertEqual([], store.list_tasks())
+
     def test_sync_once_imports_and_pushes_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "tasks.db"
