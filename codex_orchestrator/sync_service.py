@@ -5,12 +5,20 @@ import time
 from pathlib import Path
 
 from .store import TaskStore
-from .sync_providers import create_provider, load_provider_config
+from .sync_providers import SyncProvider, create_provider, load_provider_config
 
 
-def sync_once(db_path: str | Path, config_path: str | Path) -> dict[str, int]:
+def sync_once(
+    db_path: str | Path,
+    config_path: str | Path,
+    provider: SyncProvider | None = None,
+) -> dict[str, int]:
     store = TaskStore(db_path)
-    provider = create_provider(load_provider_config(str(config_path)))
+    provider = provider or create_provider(load_provider_config(str(config_path)))
+    return _sync_with_provider(store, provider)
+
+
+def _sync_with_provider(store: TaskStore, provider: SyncProvider) -> dict[str, int]:
     imported = 0
     updated = 0
 
@@ -33,9 +41,11 @@ def sync_once(db_path: str | Path, config_path: str | Path) -> dict[str, int]:
 
 
 def sync_loop(db_path: str | Path, config_path: str | Path, interval_seconds: int) -> None:
+    store = TaskStore(db_path)
+    provider = create_provider(load_provider_config(str(config_path)))
     while True:
         try:
-            result = sync_once(db_path, config_path)
+            result = _sync_with_provider(store, provider)
             print(
                 f"sync completed: imported={result['imported']} "
                 f"updated={result['updated']} config={config_path}"

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .client import TaskClient
+from .network import apply_process_proxy
 from .pool import run_pool
 from .server import serve_forever
 from .sync_service import sync_loop, sync_once
@@ -42,11 +43,13 @@ def build_parser() -> argparse.ArgumentParser:
     sync_once_parser = sync_subparsers.add_parser("once", help="run one sync cycle")
     sync_once_parser.add_argument("--db", default=".codex-runtime/tasks.db")
     sync_once_parser.add_argument("--config", required=True)
+    _add_sync_args(sync_once_parser)
 
     sync_loop_parser = sync_subparsers.add_parser("loop", help="run sync continuously")
     sync_loop_parser.add_argument("--db", default=".codex-runtime/tasks.db")
     sync_loop_parser.add_argument("--config", required=True)
     sync_loop_parser.add_argument("--interval-seconds", type=int, default=15)
+    _add_sync_args(sync_loop_parser)
 
     return parser
 
@@ -65,6 +68,11 @@ def _add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--proxy-url")
     parser.add_argument("--disable-auto-proxy", action="store_true")
     parser.add_argument("--codex-arg", action="append", default=[])
+
+
+def _add_sync_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--proxy-url")
+    parser.add_argument("--disable-auto-proxy", action="store_true")
 
 
 def main() -> None:
@@ -129,6 +137,9 @@ def main() -> None:
         return
 
     if args.command == "sync":
+        proxy_url = apply_process_proxy(args.proxy_url, auto_proxy=not args.disable_auto_proxy)
+        if proxy_url:
+            print(f"sync proxy enabled: {proxy_url}")
         if args.sync_command == "once":
             print(json.dumps(sync_once(args.db, args.config), ensure_ascii=False, indent=2))
             return

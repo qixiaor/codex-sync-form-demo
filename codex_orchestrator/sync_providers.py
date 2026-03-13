@@ -65,14 +65,20 @@ class GoogleSheetsProvider(SyncProvider):
         self.sheet_name = str(config.options.get("sheet_name", "Sheet1"))
         self.header_row = int(config.options.get("header_row", 1))
         self.api_key = _resolve_api_key(config.options)
-        self.access_token = _resolve_access_token(config.options)
+        self._direct_access_token = _resolve_direct_access_token(config.options)
+        self._service_account_credentials = _resolve_service_account_credentials(config.options)
+        self._google_request = None
         self.timeout_seconds = int(config.options.get("timeout_seconds", 30))
         self.read_range = str(config.options.get("read_range", f"{_quote_sheet_name(self.sheet_name)}!A:C"))
         self.status_column = str(config.options.get("status_column", "C"))
 
     @property
     def can_write(self) -> bool:
-        return bool(self.access_token)
+        return bool(self._direct_access_token or self._service_account_credentials)
+
+    @property
+    def access_token(self) -> str:
+        return self._get_access_token()
 
     def list_tasks(self) -> list[SourceTask]:
         params = {}
@@ -100,7 +106,7 @@ class GoogleSheetsProvider(SyncProvider):
     def update_status(self, source_task_key: str, status: str) -> None:
         if status not in VALID_STATUSES:
             raise ValueError(f"invalid status: {status}")
-        if not self.access_token:
+        if not self.can_write:
             raise RuntimeError("google-sheets writeback requires access_token or service_account_file")
         row_number = int(source_task_key)
         cell_range = f"{_quote_sheet_name(self.sheet_name)}!{self.status_column}{row_number}:{self.status_column}{row_number}"
@@ -119,8 +125,9 @@ class GoogleSheetsProvider(SyncProvider):
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         headers: dict[str, str] = {}
-        if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
+        access_token = self._get_access_token()
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
         data = None
         if body is not None:
             headers["Content-Type"] = "application/json; charset=utf-8"
@@ -136,6 +143,22 @@ class GoogleSheetsProvider(SyncProvider):
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"google-sheets {method} {url} failed: {exc.code} {body}") from exc
+
+    def _get_access_token(self) -> str:
+        if self._direct_access_token:
+            return self._direct_access_token
+        if not self._service_account_credentials:
+            return ""
+
+        credentials = self._service_account_credentials
+        if not credentials.valid or not credentials.token:
+            if self._google_request is None:
+                self._google_request = _new_google_request()
+            credentials.refresh(self._google_request)
+        token = credentials.token or ""
+        if not token:
+            raise RuntimeError("failed to obtain access token from service account")
+        return token
 
 
 class GenericJsonProvider(SyncProvider):
@@ -208,7 +231,7 @@ def _required(payload: dict[str, Any], key: str) -> str:
     return value
 
 
-def _resolve_access_token(options: dict[str, Any]) -> str:
+def _resolve_direct_access_token(options: dict[str, Any]) -> str:
     direct = str(options.get("access_token", "")).strip()
     if direct:
         return direct
@@ -216,17 +239,21 @@ def _resolve_access_token(options: dict[str, Any]) -> str:
     value = os.environ.get(env_name, "").strip()
     if value:
         return value
-    service_account_file = str(options.get("service_account_file", "")).strip()
-    if service_account_file:
-        return _build_service_account_token(
-            service_account_file=service_account_file,
-            scopes=options.get(
-                "scopes",
-                ["https://www.googleapis.com/auth/spreadsheets"],
-            ),
-            subject=str(options.get("service_account_subject", "")).strip() or None,
-        )
     return ""
+
+
+def _resolve_service_account_credentials(options: dict[str, Any]) -> Any | None:
+    service_account_file = str(options.get("service_account_file", "")).strip()
+    if not service_account_file:
+        return None
+    return _build_service_account_credentials(
+        service_account_file=service_account_file,
+        scopes=options.get(
+            "scopes",
+            ["https://www.googleapis.com/auth/spreadsheets"],
+        ),
+        subject=str(options.get("service_account_subject", "")).strip() or None,
+    )
 
 
 def _resolve_api_key(options: dict[str, Any]) -> str:
@@ -258,13 +285,15 @@ def _resolve_spreadsheet_id(options: dict[str, Any]) -> str:
     raise ValueError("google-sheets provider requires spreadsheet_id or spreadsheet_url")
 
 
-def _build_service_account_token(
+_SERVICE_ACCOUNT_CREDENTIALS_CACHE: dict[tuple[str, tuple[str, ...], str | None], Any] = {}
+
+
+def _build_service_account_credentials(
     service_account_file: str,
     scopes: list[str] | tuple[str, ...] | Any,
     subject: str | None,
-) -> str:
+) -> Any:
     try:
-        from google.auth.transport.requests import Request
         from google.oauth2 import service_account
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
@@ -272,17 +301,27 @@ def _build_service_account_token(
             "Install it with: python -m pip install google-auth"
         ) from exc
 
-    credentials = service_account.Credentials.from_service_account_file(
-        service_account_file,
-        scopes=list(scopes),
-    )
+    cache_key = (os.path.abspath(service_account_file), tuple(scopes), subject)
+    credentials = _SERVICE_ACCOUNT_CREDENTIALS_CACHE.get(cache_key)
+    if credentials is not None:
+        return credentials
+
+    credentials = service_account.Credentials.from_service_account_file(service_account_file, scopes=list(scopes))
     if subject:
         credentials = credentials.with_subject(subject)
-    credentials.refresh(Request())
-    token = credentials.token or ""
-    if not token:
-        raise RuntimeError("failed to obtain access token from service account")
-    return token
+    _SERVICE_ACCOUNT_CREDENTIALS_CACHE[cache_key] = credentials
+    return credentials
+
+
+def _new_google_request() -> Any:
+    try:
+        from google.auth.transport.requests import Request
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError(
+            "google-auth is required for service_account_file support. "
+            "Install it with: python -m pip install google-auth"
+        ) from exc
+    return Request()
 
 
 def _extract_path(payload: Any, path: str) -> Any:

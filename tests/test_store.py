@@ -1,9 +1,11 @@
 import tempfile
 import threading
 import unittest
+import os
 from pathlib import Path
 from unittest import mock
 
+from codex_orchestrator.network import apply_process_proxy
 from codex_orchestrator.store import TaskStore
 from codex_orchestrator.sync_providers import (
     GoogleSheetsProvider,
@@ -129,9 +131,25 @@ class TaskStoreTests(unittest.TestCase):
             runtime_dir=Path(".codex-runtime"),
             results_dir=Path(".codex-runtime/task-results"),
         )
-        with mock.patch("codex_orchestrator.worker.is_proxy_reachable", return_value=True):
+        with mock.patch("codex_orchestrator.network.is_proxy_reachable", return_value=True):
             env = build_codex_env(config)
         self.assertEqual("http://127.0.0.1:7890", env["HTTPS_PROXY"])
+
+    def test_apply_process_proxy_sets_environment(self) -> None:
+        keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"]
+        previous = {key: os.environ.get(key) for key in keys}
+        try:
+            with mock.patch("codex_orchestrator.network.is_proxy_reachable", return_value=True):
+                proxy_url = apply_process_proxy(None, auto_proxy=True)
+            self.assertEqual("http://127.0.0.1:7890", proxy_url)
+            self.assertEqual("http://127.0.0.1:7890", os.environ["HTTPS_PROXY"])
+            self.assertEqual("127.0.0.1,localhost,::1", os.environ["NO_PROXY"])
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     def test_write_task_result_creates_task_named_summary_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -259,10 +277,23 @@ class TaskStoreTests(unittest.TestCase):
         self.assertFalse(provider.can_write)
 
     def test_google_provider_uses_service_account_file(self) -> None:
+        credentials = mock.Mock()
+        credentials.valid = False
+        credentials.token = ""
+
+        def refresh(_: object) -> None:
+            credentials.valid = True
+            credentials.token = "service-token"
+
+        credentials.refresh.side_effect = refresh
+
         with mock.patch(
-            "codex_orchestrator.sync_providers._build_service_account_token",
-            return_value="service-token",
-        ) as token_builder:
+            "codex_orchestrator.sync_providers._build_service_account_credentials",
+            return_value=credentials,
+        ) as credentials_builder, mock.patch(
+            "codex_orchestrator.sync_providers._new_google_request",
+            return_value=object(),
+        ):
             provider = GoogleSheetsProvider(
                 ProviderConfig(
                     provider="google-sheets",
@@ -275,18 +306,48 @@ class TaskStoreTests(unittest.TestCase):
                 )
             )
         self.assertEqual("service-token", provider.access_token)
-        token_builder.assert_called_once()
+        self.assertEqual("service-token", provider.access_token)
+        credentials_builder.assert_called_once()
+        credentials.refresh.assert_called_once()
         self.assertTrue(provider.can_write)
 
     def test_sync_loop_keeps_running_after_failure(self) -> None:
         from codex_orchestrator import sync_service
 
-        with mock.patch("codex_orchestrator.sync_service.sync_once", side_effect=RuntimeError("boom")), mock.patch(
+        provider = mock.Mock()
+        provider.name = "sheet-demo"
+        provider.can_write = False
+        provider.list_tasks.side_effect = RuntimeError("boom")
+
+        with mock.patch("codex_orchestrator.sync_service.load_provider_config"), mock.patch(
+            "codex_orchestrator.sync_service.create_provider",
+            return_value=provider,
+        ), mock.patch(
             "codex_orchestrator.sync_service.time.sleep",
             side_effect=KeyboardInterrupt,
         ), mock.patch("sys.stderr"):
             with self.assertRaises(KeyboardInterrupt):
                 sync_service.sync_loop("tasks.db", "provider.json", 1)
+
+    def test_sync_loop_reuses_provider_instance(self) -> None:
+        from codex_orchestrator import sync_service
+
+        provider = mock.Mock()
+        provider.name = "sheet-demo"
+        provider.can_write = False
+        provider.list_tasks.return_value = []
+
+        with mock.patch("codex_orchestrator.sync_service.load_provider_config"), mock.patch(
+            "codex_orchestrator.sync_service.create_provider",
+            return_value=provider,
+        ) as create_provider, mock.patch(
+            "codex_orchestrator.sync_service.time.sleep",
+            side_effect=KeyboardInterrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                sync_service.sync_loop("tasks.db", "provider.json", 1)
+
+        create_provider.assert_called_once()
 
 
 if __name__ == "__main__":

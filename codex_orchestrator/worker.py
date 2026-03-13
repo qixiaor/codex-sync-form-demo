@@ -4,7 +4,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import threading
@@ -14,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .client import TaskClient
+from .network import apply_proxy_to_env
 
 
 @dataclass
@@ -222,39 +222,9 @@ def write_task_result(
     )
 
 
-def is_proxy_reachable(proxy_url: str) -> bool:
-    if not proxy_url.startswith("http://"):
-        return False
-    host_port = proxy_url.removeprefix("http://").split("/", 1)[0]
-    host, _, port_text = host_port.partition(":")
-    if not host or not port_text:
-        return False
-    try:
-        with socket.create_connection((host, int(port_text)), timeout=0.3):
-            return True
-    except OSError:
-        return False
-
-
 def build_codex_env(config: WorkerConfig) -> dict[str, str]:
     env = os.environ.copy()
-    proxy_url = config.proxy_url
-    if not proxy_url and config.auto_proxy:
-        default_proxy = "http://127.0.0.1:7890"
-        if is_proxy_reachable(default_proxy):
-            proxy_url = default_proxy
-
-    if not proxy_url:
-        return env
-
-    env["HTTP_PROXY"] = proxy_url
-    env["HTTPS_PROXY"] = proxy_url
-    env["ALL_PROXY"] = proxy_url
-    env["http_proxy"] = proxy_url
-    env["https_proxy"] = proxy_url
-    env["all_proxy"] = proxy_url
-    env["NO_PROXY"] = "127.0.0.1,localhost,::1"
-    env["no_proxy"] = "127.0.0.1,localhost,::1"
+    apply_proxy_to_env(env, proxy_url=config.proxy_url, auto_proxy=config.auto_proxy)
     return env
 
 

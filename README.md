@@ -137,6 +137,16 @@ python -m codex_orchestrator sync loop `
   --interval-seconds 15
 ```
 
+如果同步进程也需要走本地代理，直接加：
+
+```powershell
+python -m codex_orchestrator sync loop `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\google-sheets.sync.json `
+  --interval-seconds 15 `
+  --proxy-url http://127.0.0.1:7890
+```
+
 这个进程的作用：
 
 - 从 Google Sheet 读取 A/B/C 三列
@@ -212,6 +222,10 @@ python -m codex_orchestrator sync once --db .codex-runtime/tasks.db --config .\e
 
 ```powershell
 python -m codex_orchestrator sync loop --db .codex-runtime/tasks.db --config .\examples\google-sheets.sync.json --interval-seconds 15
+```
+
+```powershell
+python -m codex_orchestrator sync loop --db .codex-runtime/tasks.db --config .\examples\google-sheets.sync.json --interval-seconds 15 --proxy-url http://127.0.0.1:7890
 ```
 
 ### 启动 worker 池
@@ -298,6 +312,9 @@ Google Sheets provider 约定：
 - `sheet_name` 是否和 Google Sheet 底部标签页名字一致
 - `service_account_file` 路径是否正确
 - service account 邮箱是否已加入表格共享成员
+- 如果是 `oauth2.googleapis.com/token`、`SSLEOFError` 或 TLS 连接中断，优先给 `sync once` / `sync loop` 加 `--proxy-url http://127.0.0.1:7890`
+
+`sync loop` 现在会在进程内复用 service account 凭证，不会每一轮都重新请求一次 token；如果你修改了同步配置，需要重启 `sync` 进程让新配置生效。
 
 ### worker 没有执行任务
 
