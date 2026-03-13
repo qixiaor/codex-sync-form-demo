@@ -1,177 +1,64 @@
 # Codex CLI Task Orchestrator
 
-这个程序的目标是：
+这个程序做 3 件事：
 
-1. 从在线任务源读取任务
-2. 把任务同步到本地 SQLite 队列
-3. 用多个全新的 `codex exec` 会话并发执行任务
-4. 把执行状态写回本地任务服务
-5. 再由同步程序把状态回写到在线表格
+1. 从在线表格同步任务到本地 SQLite
+2. 用多个全新的 `codex exec` 会话并发执行任务
+3. 把本地任务状态再回写到在线表格
 
-每个任务都运行在新的 Codex CLI 会话里，因此不会继承上一个任务的上下文。
-
-## 任务表格式
-
-在线表格固定按前三列读取：
+任务表固定读取三列：
 
 | A列 | B列 | C列 |
 | --- | --- | --- |
 | 标题 | 任务详情 | 状态 |
 
-状态只允许：
+状态统一使用：
 
 - `未开始`
 - `执行中`
 - `已完成`
 
-## 组件说明
-
-这个程序运行时通常有 3 个长期进程：
-
-1. `serve`
-   本地任务服务。worker 不直接读在线表格，而是只连这个本地服务。
-2. `sync loop`
-   在线表格同步进程。负责把在线表格导入本地数据库，并把本地状态回写到在线表格。
-3. `pool`
-   worker 池。负责启动多个独立 worker，每个 worker 再启动新的 `codex exec` 执行任务。
-
-关系可以理解成：
-
-`在线表格 <-> sync loop <-> SQLite / 本地任务服务 <-> worker pool <-> codex exec`
-
-本地任务服务启动后，可以通过：
-
-- `GET /` 查看网页表格
-- `GET /table.tsv` 查看 TSV 形式的 A-C 三列
-- `GET /api/tasks` 查看完整 JSON
-
-## 并发设计
-
-并发问题按两层处理：
-
-1. 抢任务冲突
-   服务端用 SQLite `BEGIN IMMEDIATE` 事务原子地完成“挑一条 `未开始` 任务并更新成 `执行中`”。多个 worker 同时请求时，只会有一个 worker 抢到某一行。
-2. 多个 Codex CLI 写同一目录的冲突
-   每个任务都会先复制一个独立工作目录，然后在这个目录里执行新的 `codex exec`。这样不同任务不会在同一份代码上互相覆盖。
-
-之所以默认复制 workspace，是因为多个 Codex CLI 同时在同一目录改文件时，结果很容易互相覆盖，最终既无法知道是谁改坏的，也无法可靠回滚。独立 workspace 是当前并发模式下最稳妥的隔离方式。
-
-另外还有租约机制：
-
-- worker 抢到任务后会带一个 `lease_seconds`
-- 运行期间持续 heartbeat
-- 如果 worker 崩溃，租约到期后任务会被自动回收到 `未开始`
-
-## 在线表格适配
-
-现在的结构分成两层：
-
-1. 在线表格适配层
-   负责从在线表格读取 `标题 / 任务详情 / 状态`，并把本地执行状态回写回去。
-2. 本地任务队列层
-   负责并发 claim、租约、完成、失败释放。这一层仍然用 SQLite 做原子控制。
-
-这样做的原因是，大多数在线表格 API 都不提供可靠的“原子抢任务”语义。如果让多个 worker 直接抢在线表格，很容易出现同一行被多个 worker 同时领取。现在改成“先同步到本地，再由本地原子分发”，并发行为会稳定很多。
-
-当前内置了三个在线表格 provider：
+当前只保留两个同步 provider：
 
 - `google-sheets`
 - `dingtalk-base`
-- `generic-json`
 
-其中：
+## 运行结构
 
-- `google-sheets` 适合 Google Sheets
-- `dingtalk-base` 适合通过 MCP 操作钉钉多维表格
-- `generic-json` 是通用 REST 表格适配器，适合给飞书、自建表格 API 或你自己的 bridge 服务做包装
+整套程序通常有 3 个长期进程：
 
-## 启动流程
+1. `serve`
+   本地任务服务，负责 SQLite 和本地 HTTP API
+2. `sync loop`
+   在线表格同步进程，负责导入任务和回写状态
+3. `pool`
+   worker 池，负责启动多个独立 worker 和新的 `codex exec`
 
-推荐按下面顺序启动。最清晰的方式是开 3 个终端窗口。
+关系是：
 
-### 第 0 步：准备在线表格凭证
+`在线表格 <-> sync loop <-> SQLite / 本地任务服务 <-> worker pool <-> codex exec`
 
-如果你用的是 Google Sheets：
+并发控制只在本地 SQLite 里做。在线表格不负责抢任务。
 
-1. 在 Google Cloud 创建一个 service account
-2. 下载 JSON 密钥文件
-3. 把 service account 邮箱加到你的 Google Sheet 共享成员里
-4. 修改 [`examples/google-sheets.sync.json`](f:/work/codexSyncDemo/examples/google-sheets.sync.json)
+## 启动顺序
 
-至少改这两项：
+推荐固定按这个顺序启动。
 
-- `spreadsheet_url`
-- `service_account_file`
-
-并安装依赖：
-
-```powershell
-python -m pip install google-auth
-```
-
-如果你用的是钉钉多维表格 MCP：
-
-1. 安装 MCP Python SDK
-2. 修改 [`examples/dingtalk-base.sync.json`](f:/work/codexSyncDemo/examples/dingtalk-base.sync.json)
-3. 至少填上 `dentry_uuid`
-
-并安装依赖：
-
-```powershell
-python -m pip install mcp
-```
-
-### 第 1 步：启动本地任务服务
+### 1. 启动本地任务服务
 
 ```powershell
 python -m codex_orchestrator serve --host 127.0.0.1 --port 8000 --db .codex-runtime/tasks.db
 ```
 
-这个进程的作用：
+这个进程启动后，可以访问：
 
-- 提供本地 API 给 worker 抢任务
-- 维护 SQLite 里的任务状态
-- 对外提供 `/api/tasks`、`/table.tsv`、`/`
+- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:8000/table.tsv`
+- `http://127.0.0.1:8000/api/tasks`
 
-建议这个终端一直保持运行。
+### 2. 启动同步进程
 
-### 第 2 步：启动在线表格同步
-
-单次调试先用：
-
-```powershell
-python -m codex_orchestrator sync once `
-  --db .codex-runtime/tasks.db `
-  --config .\examples\google-sheets.sync.json
-```
-
-如果你用钉钉多维表格 MCP，把配置文件换成：
-
-```powershell
-python -m codex_orchestrator sync once `
-  --db .codex-runtime/tasks.db `
-  --config .\examples\dingtalk-base.sync.json
-```
-
-确认没问题后，再启动持续同步：
-
-```powershell
-python -m codex_orchestrator sync loop `
-  --db .codex-runtime/tasks.db `
-  --config .\examples\google-sheets.sync.json `
-  --interval-seconds 15
-```
-
-钉钉多维表格 MCP 对应：
-
-```powershell
-python -m codex_orchestrator sync loop `
-  --db .codex-runtime/tasks.db `
-  --config .\examples\dingtalk-base.sync.json `
-  --interval-seconds 15
-```
-
-如果同步进程也需要走本地代理，直接加：
+Google Sheets 示例：
 
 ```powershell
 python -m codex_orchestrator sync loop `
@@ -181,19 +68,35 @@ python -m codex_orchestrator sync loop `
   --proxy-url http://127.0.0.1:7890
 ```
 
-这个进程的作用：
+钉钉多维表格示例：
 
-- 从 Google Sheet 读取 A/B/C 三列
-- 导入本地 SQLite
-- 把本地任务状态回写到在线表格
+```powershell
+python -m codex_orchestrator sync loop `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\dingtalk-base.sync.json `
+  --interval-seconds 15 `
+  --proxy-url http://127.0.0.1:7890
+```
 
-`sync completed` 现在会额外打印 `writeback_errors`。如果这个值大于 `0`，说明读取导入成功了，但有部分在线状态回写失败；这种情况下不会再像以前那样整轮同步直接中断。
+如果你只想先单次调试，用 `sync once`：
 
-建议这个终端也一直保持运行。
+```powershell
+python -m codex_orchestrator sync once `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\google-sheets.sync.json `
+  --proxy-url http://127.0.0.1:7890
+```
 
-### 第 3 步：启动 worker 池
+```powershell
+python -m codex_orchestrator sync once `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\dingtalk-base.sync.json `
+  --proxy-url http://127.0.0.1:7890
+```
 
-如果是 Windows，建议显式指定 `codex.cmd`。
+### 3. 启动 worker 池
+
+Windows 建议显式指定 `codex.cmd`：
 
 ```powershell
 python -m codex_orchestrator pool `
@@ -203,10 +106,159 @@ python -m codex_orchestrator pool `
   --runtime-dir .codex-runtime `
   --codex-bin codex.cmd `
   --server-timeout-seconds 10 `
-  --codex-timeout-seconds 900
+  --codex-timeout-seconds 900 `
+  --proxy-url http://127.0.0.1:7890
 ```
 
-如果本机代理开在 `7890`，可以再加：
+### 4. 验证状态流转
+
+正常情况下：
+
+1. 在线表格中的 `未开始` 任务被同步到本地
+2. worker 抢任务后，本地状态变成 `执行中`
+3. `codex exec` 执行任务
+4. 成功后状态变成 `已完成`
+5. `sync loop` 把状态回写到在线表格
+
+## `google-sheets.sync.json` 参数说明
+
+示例文件：[`examples/google-sheets.sync.json`](/f:/work/codexSyncDemo/examples/google-sheets.sync.json)
+
+```json
+{
+  "provider": "google-sheets",
+  "name": "google-sheet-demo",
+  "spreadsheet_url": "https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID/edit?gid=0#gid=0",
+  "sheet_name": "Sheet1",
+  "header_row": 1,
+  "read_range": "'Sheet1'!A:C",
+  "status_column": "C",
+  "service_account_file": "C:/path/to/service-account.json",
+  "status_aliases": {
+    "未完成": "未开始"
+  },
+  "timeout_seconds": 30
+}
+```
+
+参数含义：
+
+| 参数 | 是否必填 | 说明 |
+| --- | --- | --- |
+| `provider` | 是 | 固定写 `google-sheets` |
+| `name` | 是 | 这个同步源的名字，会写到本地数据库 `source_name` |
+| `spreadsheet_url` | 是 | Google Sheet 共享链接，程序会自动提取 `spreadsheet_id` |
+| `sheet_name` | 是 | 底部标签页名字，例如 `Sheet1` |
+| `header_row` | 否 | 表头所在行，默认 `1` |
+| `read_range` | 否 | 读取范围，默认 `'<sheet>'!A:C` |
+| `status_column` | 否 | 状态列，默认 `C` |
+| `service_account_file` | 是 | Google service account JSON 文件路径 |
+| `status_aliases` | 否 | 状态文案映射，例如把 `未完成` 归一化成 `未开始` |
+| `timeout_seconds` | 否 | 单次 HTTP 超时时间，默认 `30` |
+
+使用前需要：
+
+1. `python -m pip install google-auth`
+2. 在 Google Cloud 创建 service account
+3. 下载 JSON 密钥文件
+4. 把 service account 邮箱加入表格共享成员
+
+## `dingtalk-base.sync.json` 参数说明
+
+示例文件：[`examples/dingtalk-base.sync.json`](/f:/work/codexSyncDemo/examples/dingtalk-base.sync.json)
+
+```json
+{
+  "provider": "dingtalk-base",
+  "name": "dingtalk-base-demo",
+  "mcp_url": "https://mcp.api-inference.modelscope.net/4ffd90bb56e447/mcp",
+  "dentry_uuid": "YOUR_DENTRY_UUID",
+  "sheet_id_or_name": "Sheet1",
+  "title_field": "标题",
+  "detail_field": "任务详情",
+  "status_field": "状态",
+  "status_aliases": {
+    "未完成": "未开始"
+  },
+  "write_enabled": true,
+  "timeout_seconds": 30
+}
+```
+
+参数含义：
+
+| 参数 | 是否必填 | 说明 |
+| --- | --- | --- |
+| `provider` | 是 | 固定写 `dingtalk-base` |
+| `name` | 是 | 这个同步源的名字，会写到本地数据库 `source_name` |
+| `mcp_url` | 是 | 钉钉 AI 表格 MCP 地址 |
+| `dentry_uuid` | 是 | 多维表格文档 ID |
+| `sheet_id_or_name` | 是 | 数据表 ID 或名字，通常是 `Sheet1` |
+| `title_field` | 否 | 标题字段名，默认 `标题` |
+| `detail_field` | 否 | 任务详情字段名，默认 `任务详情` |
+| `status_field` | 否 | 状态字段名，默认 `状态` |
+| `status_aliases` | 否 | 状态文案映射，例如把 `未完成` 归一化成 `未开始` |
+| `write_enabled` | 否 | 是否回写在线状态；只想验证读取时可设为 `false` |
+| `timeout_seconds` | 否 | 单次 MCP 调用超时时间，默认 `30` |
+
+当前 provider 默认使用这些 MCP 工具：
+
+- 读取任务：`search_base_record`
+- 回写状态：`update_records`
+
+使用前需要：
+
+1. `python -m pip install mcp`
+2. 确认 MCP 地址可访问
+3. 确认 `dentry_uuid` 和 `sheet_id_or_name` 正确
+
+## 最常用命令
+
+本地服务：
+
+```powershell
+python -m codex_orchestrator serve --host 127.0.0.1 --port 8000 --db .codex-runtime/tasks.db
+```
+
+Google Sheets 单次同步：
+
+```powershell
+python -m codex_orchestrator sync once `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\google-sheets.sync.json `
+  --proxy-url http://127.0.0.1:7890
+```
+
+Google Sheets 持续同步：
+
+```powershell
+python -m codex_orchestrator sync loop `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\google-sheets.sync.json `
+  --interval-seconds 15 `
+  --proxy-url http://127.0.0.1:7890
+```
+
+钉钉多维表格单次同步：
+
+```powershell
+python -m codex_orchestrator sync once `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\dingtalk-base.sync.json `
+  --proxy-url http://127.0.0.1:7890
+```
+
+钉钉多维表格持续同步：
+
+```powershell
+python -m codex_orchestrator sync loop `
+  --db .codex-runtime/tasks.db `
+  --config .\examples\dingtalk-base.sync.json `
+  --interval-seconds 15 `
+  --proxy-url http://127.0.0.1:7890
+```
+
+完整 worker 池启动：
 
 ```powershell
 python -m codex_orchestrator pool `
@@ -215,232 +267,61 @@ python -m codex_orchestrator pool `
   --template-dir . `
   --runtime-dir .codex-runtime `
   --codex-bin codex.cmd `
+  --server-timeout-seconds 10 `
+  --codex-timeout-seconds 900 `
   --proxy-url http://127.0.0.1:7890
 ```
 
-这个进程的作用：
+## 同步输出说明
 
-- 从本地任务服务领取 `未开始` 任务
-- 给每个任务复制独立 workspace
-- 启动新的 `codex exec`
-- 完成后更新状态
+`sync completed` 会打印三个关键数字：
 
-### 第 4 步：确认系统在正常工作
+- `imported`: 本轮从在线表格导入到本地的任务数
+- `updated`: 本轮成功回写到在线表格的任务数
+- `writeback_errors`: 本轮回写失败的任务数
 
-可以打开：
-
-- `http://127.0.0.1:8000/`
-- `http://127.0.0.1:8000/api/tasks`
-
-正常情况下你会看到状态流转：
-
-1. 从在线 URL 抢一条 `未开始` 任务
-2. 变成 `执行中`
-3. 启动一个全新的 `codex exec`
-4. 成功则把状态更新为 `已完成`
-5. 失败则回退为 `未开始`
-
-## 常用命令
-
-### 本地服务
-
-```powershell
-python -m codex_orchestrator serve --host 127.0.0.1 --port 8000 --db .codex-runtime/tasks.db
-```
-
-### 单次同步
-
-```powershell
-python -m codex_orchestrator sync once --db .codex-runtime/tasks.db --config .\examples\google-sheets.sync.json
-```
-
-```powershell
-python -m codex_orchestrator sync once --db .codex-runtime/tasks.db --config .\examples\dingtalk-base.sync.json
-```
-
-### 持续同步
-
-```powershell
-python -m codex_orchestrator sync loop --db .codex-runtime/tasks.db --config .\examples\google-sheets.sync.json --interval-seconds 15
-```
-
-```powershell
-python -m codex_orchestrator sync loop --db .codex-runtime/tasks.db --config .\examples\dingtalk-base.sync.json --interval-seconds 15
-```
-
-```powershell
-python -m codex_orchestrator sync loop --db .codex-runtime/tasks.db --config .\examples\google-sheets.sync.json --interval-seconds 15 --proxy-url http://127.0.0.1:7890
-```
-
-### 启动 worker 池
-
-```powershell
-python -m codex_orchestrator pool --server-url http://127.0.0.1:8000 --workers 3 --template-dir . --runtime-dir .codex-runtime --codex-bin codex.cmd
-```
-
-## Provider 配置
-
-### Google Sheets
-
-示例文件：[`examples/google-sheets.sync.json`](f:/work/codexSyncDemo/examples/google-sheets.sync.json)
-
-推荐使用 `service_account_file`，因为它可以同时完成读取和状态回写。
-
-需要提供：
-
-- `spreadsheet_url` 或 `spreadsheet_id`
-- `sheet_name`
-- `service_account_file`
-
-安装依赖：
-
-```powershell
-python -m pip install google-auth
-```
-
-1. 在 Google Cloud 创建一个 service account，并下载 JSON 密钥文件。
-2. 把这个 service account 的邮箱加入你的 Google Sheet 共享成员，至少给编辑权限。
-3. 把共享链接填到 `spreadsheet_url`。
-4. 把 JSON 文件路径填到 `service_account_file`。
-5. 运行 `sync once` 或 `sync loop`。
-
-如果你的共享链接是：
-
-```text
-https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/edit?gid=0#gid=0
-```
-
-程序会自动提取：
-
-```text
-1AbCdEfGhIjKlMnOpQrStUvWxYz
-```
-
-所以通常不需要手工找 `spreadsheet_id`。
-
-Google Sheets provider 约定：
-
-- A列：标题
-- B列：任务详情
-- C列：状态
-- 第 1 行默认是表头
-- 程序会回写对应行的 C 列状态
-
-### Generic JSON
-
-示例文件：[`examples/generic-json.sync.json`](f:/work/codexSyncDemo/examples/generic-json.sync.json)
-
-这个 provider 用于适配“在线表格已经有 HTTP API”的场景。你只需要告诉程序：
-
-- 从哪个 URL 读列表
-- 列表数组在 JSON 里的哪一层
-- 哪个字段是 `id/title/detail/status`
-- 更新单条状态时的 URL 模板和 HTTP 方法
-
-`headers` 支持 `${ENV_NAME}` 形式的环境变量替换，方便放 token。
-
-### DingTalk Base MCP
-
-示例文件：[`examples/dingtalk-base.sync.json`](f:/work/codexSyncDemo/examples/dingtalk-base.sync.json)
-
-这个 provider 用于通过 MCP 访问钉钉多维表格。当前默认示例 MCP 地址就是你提供的 `AI-table`：
-
-```json
-{
-  "mcp_url": "https://mcp.api-inference.modelscope.net/4ffd90bb56e447/mcp"
-}
-```
-
-需要提供：
-
-- `mcp_url`
-- `dentry_uuid`
-- `sheet_id_or_name`
-- `write_enabled`
-
-安装依赖：
-
-```powershell
-python -m pip install mcp
-```
-
-字段默认约定：
-
-- `标题`
-- `任务详情`
-- `状态`
-
-默认状态别名：
-
-- `未完成` -> `未开始`
-- `进行中` -> `执行中`
-- `处理中` -> `执行中`
-- `完成` -> `已完成`
-
-对应 MCP 工具映射：
-
-- 读取任务：`search_base_record`
-- 回写状态：`update_records`
-
-程序会把钉钉记录的 `id` 当成 `source_task_key`，所以不会和现有 Google Sheets 的行号逻辑混淆。
-
-如果你只想先验证“能否读取任务”，不想立刻回写在线表格，可以在配置里设：
-
-```json
-{
-  "write_enabled": false
-}
-```
-
-如果你的在线表格状态文案不是 `未开始 / 执行中 / 已完成`，可以通过 `status_aliases` 显式映射。
+如果 `writeback_errors > 0`，说明读取成功，但有部分状态没写回在线表格。
 
 ## 目录说明
 
-- `.codex-runtime/tasks.db`: 任务数据库
+- `.codex-runtime/tasks.db`: 本地任务数据库
 - `.codex-runtime/worker-*/task-*/workspace`: 每个任务的独立工作区
-- `.codex-runtime/worker-*/task-*/logs`: `codex` 标准输出、错误输出和最终摘要
-- `.codex-runtime/task-results/task-0001-*.json|txt`: 按 task 编号输出的结果摘要，里面会直接写明标题、详情、状态、worker、workspace、logs 路径
+- `.codex-runtime/worker-*/task-*/logs`: `codex` 执行日志
+- `.codex-runtime/task-results/task-*.json|txt`: 按任务编号输出的结果摘要
 
 ## 故障排查
 
-### `sync once` / `sync loop` 报错
+`sync loop` 没导入任务：
 
-优先检查：
+- 检查 `sync.json` 里的 `provider` 是否正确
+- 检查 Google 的 `sheet_name` 或钉钉的 `sheet_id_or_name` 是否正确
+- 检查状态列内容是否能映射到 `未开始 / 执行中 / 已完成`
+- 先用 `sync once` 看一次性结果
 
-- `spreadsheet_url` 是否正确
-- `sheet_name` 是否和 Google Sheet 底部标签页名字一致
-- `service_account_file` 路径是否正确
-- service account 邮箱是否已加入表格共享成员
-- 如果是 `oauth2.googleapis.com/token`、`SSLEOFError` 或 TLS 连接中断，优先给 `sync once` / `sync loop` 加 `--proxy-url http://127.0.0.1:7890`
-- 如果是钉钉多维表格，优先检查 `dentry_uuid`、`sheet_id_or_name`、MCP 地址和 MCP 工具权限是否正确
+Google 同步网络问题：
 
-`sync loop` 现在会在进程内复用 service account 凭证，不会每一轮都重新请求一次 token；如果你修改了同步配置，需要重启 `sync` 进程让新配置生效。
+- 如果看到 `oauth2.googleapis.com/token`
+- 或 `SSLEOFError`
+- 或 TLS 超时
 
-### worker 没有执行任务
-
-优先检查：
-
-- `serve` 是否还在运行
-- `sync loop` 是否已经把任务导入到本地
-- `http://127.0.0.1:8000/api/tasks` 里是否存在 `未开始` 任务
-
-### Codex 连接慢或超时
-
-如果本机代理监听在 `7890`，启动 `pool` 时加：
+优先给 `sync once` / `sync loop` 加：
 
 ```powershell
 --proxy-url http://127.0.0.1:7890
 ```
 
-## 运行测试
+worker 不执行任务：
+
+- 检查 `serve` 是否还在运行
+- 检查 `sync loop` 是否已经把任务导入本地
+- 检查 `http://127.0.0.1:8000/api/tasks` 里是否存在 `未开始` 任务
+
+Codex CLI 连接慢：
+
+- 启动 `pool` 时加 `--proxy-url http://127.0.0.1:7890`
+
+## 测试
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
-
-## 说明
-
-- 默认本地 worker 仍然连程序自带的 HTTP 任务服务；在线表格通过 `sync` 命令导入/回写，不直接给 worker 抢。
-- `sync` 当前会把在线表格里的标题和详情持续同步到本地；状态以本地队列为准，再反向回写到在线表格。
-- 如果你后面要接入现有的在线表格系统，比如 Google Sheets、飞书多维表格、钉钉表格或自建 API，优先新增一个 provider，不要改 worker 的并发控制逻辑。
-- 当前实现不会自动把多个并发任务的代码改动合并回同一份目录，因为这件事没有可靠的无冲突通用方案。程序会把每个任务结果保存在独立工作区里，供你后续审查或手工合并。

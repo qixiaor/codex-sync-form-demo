@@ -40,8 +40,6 @@ def create_provider(config: ProviderConfig) -> "SyncProvider":
         return GoogleSheetsProvider(config)
     if config.provider == "dingtalk-base":
         return DingTalkBaseProvider(config)
-    if config.provider == "generic-json":
-        return GenericJsonProvider(config)
     raise ValueError(f"unsupported provider: {config.provider}")
 
 
@@ -272,70 +270,6 @@ class DingTalkBaseProvider(SyncProvider):
         return base_arguments
 
 
-class GenericJsonProvider(SyncProvider):
-    def __init__(self, config: ProviderConfig) -> None:
-        super().__init__(config)
-        options = config.options
-        self.read_url = _required(options, "read_url")
-        self.write_url_template = str(options.get("write_url_template", "")).strip()
-        self.timeout_seconds = int(options.get("timeout_seconds", 30))
-        self.method = str(options.get("write_method", "PATCH")).upper()
-        self.list_field = str(options.get("list_field", "")).strip()
-        self.task_key_field = str(options.get("task_key_field", "id"))
-        self.title_field = str(options.get("title_field", "title"))
-        self.detail_field = str(options.get("detail_field", "detail"))
-        self.status_field = str(options.get("status_field", "status"))
-        self.headers = {str(key): str(value) for key, value in options.get("headers", {}).items()}
-        self.status_aliases = _build_status_aliases(options)
-
-    @property
-    def can_write(self) -> bool:
-        return bool(self.write_url_template)
-
-    def list_tasks(self) -> list[SourceTask]:
-        payload = self._request_json("GET", self.read_url)
-        items = _extract_path(payload, self.list_field) if self.list_field else payload
-        if not isinstance(items, list):
-            raise ValueError("generic-json list_field must resolve to a list")
-        tasks: list[SourceTask] = []
-        for item in items:
-            title = str(item.get(self.title_field, "")).strip()
-            detail = str(item.get(self.detail_field, "")).strip()
-            status = _normalize_status(str(item.get(self.status_field, "")).strip(), self.status_aliases)
-            if status not in VALID_STATUSES:
-                continue
-            tasks.append(
-                SourceTask(
-                    source_task_key=str(item[self.task_key_field]),
-                    title=title,
-                    detail=detail,
-                    status=status,
-                )
-            )
-        return tasks
-
-    def update_status(self, source_task_key: str, status: str) -> None:
-        if not self.write_url_template:
-            raise RuntimeError("generic-json provider is read-only without write_url_template")
-        url = self.write_url_template.replace("{task_key}", parse.quote(str(source_task_key), safe=""))
-        self._request_json(self.method, url, {self.status_field: status})
-
-    def _request_json(self, method: str, url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        headers = dict(self.headers)
-        data = None
-        if body is not None:
-            headers["Content-Type"] = "application/json; charset=utf-8"
-            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        req = request.Request(url, data=data, method=method, headers=headers)
-        try:
-            with request.urlopen(req, timeout=self.timeout_seconds) as response:
-                raw = response.read().decode("utf-8")
-                return json.loads(raw) if raw.strip() else {}
-        except error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"generic-json {method} {url} failed: {exc.code} {body}") from exc
-
-
 def _required(payload: dict[str, Any], key: str) -> str:
     value = str(payload.get(key, "")).strip()
     if not value:
@@ -468,17 +402,6 @@ def _new_google_request() -> Any:
             "Install it with: python -m pip install google-auth"
         ) from exc
     return Request()
-
-
-def _extract_path(payload: Any, path: str) -> Any:
-    current = payload
-    for part in path.split("."):
-        if not part:
-            continue
-        if not isinstance(current, dict):
-            raise ValueError(f"cannot traverse list_field path '{path}'")
-        current = current.get(part)
-    return current
 
 
 def _replace_env_tokens(text: str) -> str:

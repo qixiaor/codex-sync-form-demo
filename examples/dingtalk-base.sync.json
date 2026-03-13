@@ -1,8 +1,8 @@
 {
   "provider": "dingtalk-base",
-  "name": "无标题表格",
+  "name": "dingtalk-base-demo",
   "mcp_url": "https://mcp.api-inference.modelscope.net/4ffd90bb56e447/mcp",
-  "dentry_uuid": "1DKw2zgV2PpdzzQ1SBzpZPGL8B5r9YAn",
+  "dentry_uuid": "YOUR_DENTRY_UUID",
   "sheet_id_or_name": "Sheet1",
   "title_field": "标题",
   "detail_field": "任务详情",
