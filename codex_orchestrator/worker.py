@@ -51,7 +51,10 @@ class WorkerConfig:
         if not self.agent_extra_args and self.codex_extra_args:
             self.agent_extra_args = list(self.codex_extra_args)
         if self.agent_use_stdin is None:
-            self.agent_use_stdin = self.agent_type == "codex"
+            agent_name = Path(self.agent_bin or "").stem.lower()
+            self.agent_use_stdin = self.agent_type == "codex" or (
+                self.agent_type == "command-template" and "claude" in agent_name
+            )
 
 
 def run_worker(config: WorkerConfig) -> None:
@@ -148,6 +151,8 @@ def copy_template(template_dir: Path, workspace_dir: Path, runtime_dir: Path) ->
         ".venv",
         "__pycache__",
         ".pytest_cache",
+        ".codex-runtime",
+        ".claude-runtime",
     }
     ignore_names.add(runtime_dir.name)
     try:
@@ -158,7 +163,17 @@ def copy_template(template_dir: Path, workspace_dir: Path, runtime_dir: Path) ->
         pass
 
     def _ignore(_: str, names: list[str]) -> set[str]:
-        return {name for name in names if name in ignore_names}
+        ignored: set[str] = set()
+        for name in names:
+            if name in ignore_names:
+                ignored.add(name)
+                continue
+            if name.startswith(".") and name.endswith("-runtime"):
+                ignored.add(name)
+                continue
+            if name.endswith(".db-wal") or name.endswith(".db-shm"):
+                ignored.add(name)
+        return ignored
 
     shutil.copytree(template_dir, workspace_dir, ignore=_ignore)
 
@@ -310,6 +325,7 @@ def run_agent(
         check=False,
         timeout=config.agent_timeout_seconds,
         env=env,
+        cwd=str(workspace_dir),
     )
     stdout_path.write_text(process.stdout, encoding="utf-8")
     stderr_path.write_text(process.stderr, encoding="utf-8")
@@ -420,15 +436,17 @@ def resolve_agent_command_template(config: WorkerConfig) -> list[str]:
 def default_agent_command_template(agent_bin: str, use_stdin: bool = False) -> list[str]:
     agent_name = Path(agent_bin).stem.lower()
     if "claude" in agent_name:
-        return [
+        command = [
             "{agent_bin}",
             "--print",
             "--output-format",
             "text",
-            "--cwd",
-            "{workspace_dir}",
-            "{prompt}",
+            "--permission-mode",
+            "bypassPermissions",
         ]
+        if not use_stdin:
+            command.append("{prompt}")
+        return command
     if use_stdin:
         return ["{agent_bin}"]
     return ["{agent_bin}", "{prompt}"]

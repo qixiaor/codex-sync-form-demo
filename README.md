@@ -161,6 +161,21 @@ python -m codex_orchestrator pool `
   --proxy-url http://127.0.0.1:7890
 ```
 
+### 3.1 worker 工作目录参数（重点）
+
+很多人会把 `--template-dir` 误解成“运行时切换 cwd”。这里明确一下：
+
+- `--template-dir`：任务模板目录（源目录）。每个任务开始时，worker 会把这个目录复制到该任务的独立 `workspace`，然后在这个 `workspace` 里执行智能体命令。
+- `--runtime-dir`：运行时目录（目标根目录）。每个任务的 `workspace`、`logs`、worker 临时目录都在这里。
+- `--results-dir`：任务结果摘要输出目录（默认是 `<runtime-dir>/task-results`）。
+
+这意味着你可以显式指定“在哪个项目里执行”：
+
+- 想让任务在 `F:\work\my-project` 上下文中执行，就把 `--template-dir` 设为 `F:\work\my-project`。
+- 程序不会在原项目目录原地执行，而是复制一份到任务 `workspace` 后再执行，避免多个 worker 并发互相污染。
+
+另外，当前没有对外暴露 `--cwd` 参数；worker 内部会自动把每个任务子进程的 `cwd` 设为该任务 `workspace`。
+
 ### 4. 验证状态流转
 
 正常情况下：
@@ -337,14 +352,14 @@ python -m codex_orchestrator pool `
   --runtime-dir .codex-runtime `
   --agent-type command-template `
   --agent-bin claude `
-  --agent-command-template '["{agent_bin}","--print","--cwd","{workspace_dir}","--prompt-file","{prompt_path}","--output","{final_message_path}"]' `
+  --agent-command-template '["{agent_bin}","--print","--prompt-file","{prompt_path}","--output","{final_message_path}"]' `
   --agent-no-stdin `
   --proxy-url http://127.0.0.1:7890
 ```
 
 如果你不传 `--agent-command-template`，程序也会走默认兜底：
 
-- `claude` / `claude.exe` / `claude.cmd`：自动使用内置 Claude 模板
+- `claude` / `claude.exe` / `claude.cmd`：自动使用内置 Claude 模板，默认走 stdin 传 prompt（避免 Windows 下多行参数被截断），并附带 `--permission-mode bypassPermissions` 避免交互确认卡住
 - 其他未知 CLI：默认按 `可执行文件 + prompt 参数` 方式调用
 - 如果你显式传了 `--agent-use-stdin`，未知 CLI 会退化成只启动可执行文件本身，由 stdin 提供 prompt
 

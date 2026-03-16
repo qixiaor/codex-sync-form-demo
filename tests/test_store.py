@@ -97,6 +97,29 @@ class TaskStoreTests(unittest.TestCase):
             self.assertTrue((workspace_dir / "app.txt").exists())
             self.assertFalse((workspace_dir / ".codex-runtime").exists())
 
+    def test_copy_template_skips_other_runtime_dirs_and_sqlite_transients(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            template_dir = root / "repo"
+            runtime_dir = template_dir / ".claude-runtime" / "worker-0"
+            workspace_dir = root / "workspace"
+            template_dir.mkdir()
+            runtime_dir.mkdir(parents=True)
+            (template_dir / "app.txt").write_text("keep", encoding="utf-8")
+            codex_runtime = template_dir / ".codex-runtime"
+            codex_runtime.mkdir(parents=True)
+            (codex_runtime / "tasks.db").write_text("skip", encoding="utf-8")
+            (template_dir / "temp.db-wal").write_text("skip", encoding="utf-8")
+            (template_dir / "temp.db-shm").write_text("skip", encoding="utf-8")
+
+            copy_template(template_dir, workspace_dir, runtime_dir)
+
+            self.assertTrue((workspace_dir / "app.txt").exists())
+            self.assertFalse((workspace_dir / ".codex-runtime").exists())
+            self.assertFalse((workspace_dir / ".claude-runtime").exists())
+            self.assertFalse((workspace_dir / "temp.db-wal").exists())
+            self.assertFalse((workspace_dir / "temp.db-shm").exists())
+
     def test_resolve_codex_launcher_uses_cmd_on_windows(self) -> None:
         with mock.patch("codex_orchestrator.worker.shutil.which", return_value=r"E:\nodejs\codex.cmd"):
             self.assertEqual([r"E:\nodejs\codex.cmd"], resolve_codex_launcher("codex"))
@@ -161,6 +184,18 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(["--foo"], config.agent_extra_args)
         self.assertTrue(config.agent_use_stdin)
 
+    def test_worker_config_defaults_claude_command_template_to_stdin(self) -> None:
+        config = WorkerConfig(
+            server_url="http://127.0.0.1:8000",
+            worker_id="worker-0",
+            template_dir=Path("."),
+            runtime_dir=Path(".codex-runtime"),
+            results_dir=Path(".codex-runtime/task-results"),
+            agent_type="command-template",
+            agent_bin="claude.cmd",
+        )
+        self.assertTrue(config.agent_use_stdin)
+
     def test_load_agent_command_template_accepts_json_array(self) -> None:
         template = load_agent_command_template('["claude", "-p", "{prompt_path}"]')
         self.assertEqual(["claude", "-p", "{prompt_path}"], template)
@@ -211,11 +246,24 @@ class TaskStoreTests(unittest.TestCase):
                 "--print",
                 "--output-format",
                 "text",
-                "--cwd",
-                "{workspace_dir}",
+                "--permission-mode",
+                "bypassPermissions",
                 "{prompt}",
             ],
             default_agent_command_template("claude"),
+        )
+
+    def test_default_agent_command_template_uses_claude_stdin_preset(self) -> None:
+        self.assertEqual(
+            [
+                "{agent_bin}",
+                "--print",
+                "--output-format",
+                "text",
+                "--permission-mode",
+                "bypassPermissions",
+            ],
+            default_agent_command_template("claude", use_stdin=True),
         )
 
     def test_default_agent_command_template_uses_generic_prompt_arg(self) -> None:
