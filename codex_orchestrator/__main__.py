@@ -86,7 +86,7 @@ def _add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--workspace-sync-back",
         choices=["never", "on-success", "always"],
-        default="never",
+        default="on-success",
     )
 
 

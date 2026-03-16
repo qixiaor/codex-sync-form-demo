@@ -43,7 +43,7 @@ class WorkerConfig:
     auto_proxy: bool = True
     codex_extra_args: list[str] = field(default_factory=list)
     workspace_cleanup: str = "after-sync-back"
-    workspace_sync_back: str = "never"
+    workspace_sync_back: str = "on-success"
 
     def __post_init__(self) -> None:
         if self.agent_bin is None:
@@ -96,6 +96,7 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
     logs_dir = run_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     copy_template(config.template_dir, workspace_dir, config.runtime_dir)
+    prepare_workspace_for_agent(config, workspace_dir)
 
     stop_heartbeat = threading.Event()
     heartbeat_thread = threading.Thread(
@@ -196,6 +197,33 @@ def copy_template(template_dir: Path, workspace_dir: Path, runtime_dir: Path) ->
         return ignored
 
     shutil.copytree(template_dir, workspace_dir, ignore=_ignore)
+
+
+def prepare_workspace_for_agent(config: WorkerConfig, workspace_dir: Path) -> None:
+    marker_path = workspace_dir / ".codex_orchestrator_workspace_root"
+    marker_path.write_text(str(workspace_dir), encoding="utf-8")
+    if not _is_claude_agent(config.agent_bin):
+        return
+    git_dir = workspace_dir / ".git"
+    if git_dir.exists():
+        return
+    try:
+        process = subprocess.run(
+            ["git", "init"],
+            cwd=str(workspace_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+        if process.returncode == 0:
+            print(f"[{config.worker_id}] initialized isolated git root in workspace: {workspace_dir}")
+    except Exception:
+        return
+
+
+def _is_claude_agent(agent_bin: str | None) -> bool:
+    return "claude" in Path(agent_bin or "").stem.lower()
 
 
 def should_cleanup_workspace(cleanup_mode: str, execution_status: str, sync_back_succeeded: bool = False) -> bool:
@@ -301,6 +329,8 @@ def sync_workspace_to_template(
             if not workspace_file.is_file():
                 continue
             relative_path = workspace_file.relative_to(workspace_dir)
+            if _should_skip_sync_back_path(relative_path):
+                continue
             target_file = template_dir / relative_path
             stats["scanned_files"] += 1
             try:
@@ -320,6 +350,27 @@ def sync_workspace_to_template(
             except Exception:
                 stats["error_files"] += 1
     return stats
+
+
+def _should_skip_sync_back_path(relative_path: Path) -> bool:
+    if not relative_path.parts:
+        return False
+    top = relative_path.parts[0]
+    skip_top_level = {
+        ".git",
+        ".codex-runtime",
+        ".claude-runtime",
+        "__pycache__",
+        ".pytest_cache",
+    }
+    if top in skip_top_level:
+        return True
+    filename = relative_path.name
+    if filename.endswith(".db-wal") or filename.endswith(".db-shm"):
+        return True
+    if filename.startswith(".codex_orchestrator_"):
+        return True
+    return False
 
 
 def _file_needs_sync(workspace_file: Path, target_file: Path) -> bool:
@@ -396,7 +447,7 @@ def _clear_stale_lock(lock_path: Path, stale_after_seconds: int) -> None:
         return
 
 
-def build_prompt(task: dict[str, object]) -> str:
+def build_prompt(task: dict[str, object], workspace_dir: Path) -> str:
     title = str(task["title"]).strip()
     detail = str(task["detail"]).strip()
     return (
@@ -405,6 +456,7 @@ def build_prompt(task: dict[str, object]) -> str:
         "1. 直接完成任务，不要只给方案。\n"
         "2. 如有代码改动，请自行验证能否运行或测试；如果无法验证，要明确说明原因。\n"
         "3. 最终输出一段简短总结，说明改了什么、如何验证、还有什么风险。\n\n"
+        f"4. 只允许访问 workspace 目录及其子目录，不要访问父目录或其他项目：{workspace_dir}\n\n"
         f"任务标题：{title}\n"
         f"任务详情：{detail}\n"
     )
@@ -522,7 +574,7 @@ def run_agent(
     workspace_dir: Path,
     logs_dir: Path,
 ) -> dict[str, object]:
-    prompt = build_prompt(task)
+    prompt = build_prompt(task, workspace_dir)
     prompt_path = logs_dir / "prompt.txt"
     final_message_path = logs_dir / "final_message.txt"
     stdout_path = logs_dir / "stdout.txt"
@@ -661,6 +713,10 @@ def default_agent_command_template(agent_bin: str, use_stdin: bool = False) -> l
             "text",
             "--permission-mode",
             "bypassPermissions",
+            "--setting-sources",
+            "user",
+            "--add-dir",
+            "{workspace_dir}",
         ]
         if not use_stdin:
             command.append("{prompt}")

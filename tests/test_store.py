@@ -28,6 +28,7 @@ from codex_orchestrator.worker import (
     copy_template,
     default_agent_command_template,
     load_agent_command_template,
+    prepare_workspace_for_agent,
     resolve_codex_launcher,
     should_sync_workspace_back,
     sync_workspace_to_template,
@@ -126,6 +127,27 @@ class TaskStoreTests(unittest.TestCase):
             self.assertFalse((workspace_dir / "temp.db-wal").exists())
             self.assertFalse((workspace_dir / "temp.db-shm").exists())
 
+    def test_prepare_workspace_for_agent_writes_workspace_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            workspace_dir = root / "workspace"
+            workspace_dir.mkdir()
+            config = WorkerConfig(
+                server_url="http://127.0.0.1:8000",
+                worker_id="worker-0",
+                template_dir=root,
+                runtime_dir=root / "runtime",
+                results_dir=root / "results",
+                agent_type="command-template",
+                agent_bin="my-agent",
+            )
+
+            prepare_workspace_for_agent(config, workspace_dir)
+
+            marker = workspace_dir / ".codex_orchestrator_workspace_root"
+            self.assertTrue(marker.exists())
+            self.assertEqual(str(workspace_dir), marker.read_text(encoding="utf-8"))
+
     def test_should_cleanup_workspace_on_success(self) -> None:
         self.assertTrue(should_cleanup_workspace("on-success", "completed"))
         self.assertFalse(should_cleanup_workspace("on-success", "released"))
@@ -200,6 +222,30 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(0, stats["synced_files"])
             self.assertEqual(1, stats["conflict_files"])
 
+    def test_sync_workspace_to_template_skips_workspace_metadata_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            template_dir = root / "template"
+            workspace_dir = root / "workspace"
+            template_dir.mkdir()
+            workspace_dir.mkdir()
+            git_dir = workspace_dir / ".git"
+            git_dir.mkdir()
+            (git_dir / "config").write_text("fake", encoding="utf-8")
+            (workspace_dir / ".codex_orchestrator_workspace_root").write_text("root", encoding="utf-8")
+            (workspace_dir / "app.txt").write_text("changed", encoding="utf-8")
+
+            stats = sync_workspace_to_template(
+                workspace_dir=workspace_dir,
+                template_dir=template_dir,
+                task_started_epoch=time.time(),
+            )
+
+            self.assertTrue((template_dir / "app.txt").exists())
+            self.assertFalse((template_dir / ".git").exists())
+            self.assertFalse((template_dir / ".codex_orchestrator_workspace_root").exists())
+            self.assertEqual(1, stats["synced_files"])
+
     def test_resolve_codex_launcher_uses_cmd_on_windows(self) -> None:
         with mock.patch("codex_orchestrator.worker.shutil.which", return_value=r"E:\nodejs\codex.cmd"):
             self.assertEqual([r"E:\nodejs\codex.cmd"], resolve_codex_launcher("codex"))
@@ -264,6 +310,7 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(["--foo"], config.agent_extra_args)
         self.assertTrue(config.agent_use_stdin)
         self.assertEqual("after-sync-back", config.workspace_cleanup)
+        self.assertEqual("on-success", config.workspace_sync_back)
 
     def test_worker_config_defaults_claude_command_template_to_stdin(self) -> None:
         config = WorkerConfig(
@@ -351,6 +398,10 @@ class TaskStoreTests(unittest.TestCase):
                 "text",
                 "--permission-mode",
                 "bypassPermissions",
+                "--setting-sources",
+                "user",
+                "--add-dir",
+                "{workspace_dir}",
                 "{prompt}",
             ],
             default_agent_command_template("claude"),
@@ -365,6 +416,10 @@ class TaskStoreTests(unittest.TestCase):
                 "text",
                 "--permission-mode",
                 "bypassPermissions",
+                "--setting-sources",
+                "user",
+                "--add-dir",
+                "{workspace_dir}",
             ],
             default_agent_command_template("claude", use_stdin=True),
         )

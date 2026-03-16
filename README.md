@@ -169,12 +169,13 @@ python -m codex_orchestrator pool `
 - `--runtime-dir`：运行时目录（目标根目录）。每个任务的 `workspace`、`logs`、worker 临时目录都在这里。
 - `--results-dir`：任务结果摘要输出目录（默认是 `<runtime-dir>/task-results`）。
 - `--workspace-cleanup`：任务结束后的 workspace 清理策略。`after-sync-back`（默认，仅“成功回写主项目”后清理）、`on-success`（只清理成功任务）、`always`（成功/失败都清理）、`never`（不清理）。
-- `--workspace-sync-back`：是否把任务 `workspace` 的变更文件增量回写到 `--template-dir`。`never`（默认，不回写）、`on-success`（仅成功任务回写）、`always`（无论成功失败都回写）。
+- `--workspace-sync-back`：是否把任务 `workspace` 的变更文件增量回写到 `--template-dir`。`on-success`（默认，仅成功任务回写）、`never`（不回写）、`always`（无论成功失败都回写）。
 
 这意味着你可以显式指定“在哪个项目里执行”：
 
 - 想让任务在 `F:\work\my-project` 上下文中执行，就把 `--template-dir` 设为 `F:\work\my-project`。
 - 程序不会在原项目目录原地执行，而是复制一份到任务 `workspace` 后再执行，避免多个 worker 并发互相污染。
+- 为减少 Claude 误读父目录项目的概率，worker 会在 `workspace` 写入根目录标记，并尝试初始化独立 `.git` 根。
 - 如果模板目录很大，建议至少加 `--workspace-cleanup always`，避免磁盘被历史 workspace 快速占满。
 - 如果你希望把改动写回主项目，再加 `--workspace-sync-back on-success`（只同步变更文件，不做整目录对拷）。
 - 回写时会加文件锁，避免多个 worker 同时写主项目；若主项目文件在任务执行期间已被外部修改，该文件会标记冲突并跳过。
@@ -364,7 +365,7 @@ python -m codex_orchestrator pool `
 
 如果你不传 `--agent-command-template`，程序也会走默认兜底：
 
-- `claude` / `claude.exe` / `claude.cmd`：自动使用内置 Claude 模板，默认走 stdin 传 prompt（避免 Windows 下多行参数被截断），并附带 `--permission-mode bypassPermissions` 避免交互确认卡住
+- `claude` / `claude.exe` / `claude.cmd`：自动使用内置 Claude 模板，默认走 stdin 传 prompt（避免 Windows 下多行参数被截断），并附带 `--permission-mode bypassPermissions`、`--setting-sources user`、`--add-dir {workspace_dir}` 提高隔离稳定性
 - 其他未知 CLI：默认按 `可执行文件 + prompt 参数` 方式调用
 - 如果你显式传了 `--agent-use-stdin`，未知 CLI 会退化成只启动可执行文件本身，由 stdin 提供 prompt
 
@@ -438,7 +439,7 @@ worker / pool 现在支持两套参数：
 | `--agent-no-stdin` | 不走 stdin，由命令模板自己消费 `prompt_path` 或 `{prompt}` |
 | `--agent-arg` | 给智能体 CLI 追加额外参数，可重复传入 |
 | `--workspace-cleanup` | 任务结束后的 workspace 清理策略：`after-sync-back` / `on-success` / `always` / `never`，默认 `after-sync-back` |
-| `--workspace-sync-back` | 把 workspace 变更增量回写到 `--template-dir`：`never` / `on-success` / `always`，默认 `never` |
+| `--workspace-sync-back` | 把 workspace 变更增量回写到 `--template-dir`：`on-success` / `never` / `always`，默认 `on-success` |
 
 ## 测试
 
