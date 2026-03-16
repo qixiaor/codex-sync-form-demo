@@ -9,6 +9,8 @@ import subprocess
 import sys
 import threading
 import time
+import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,6 +42,8 @@ class WorkerConfig:
     proxy_url: str | None = None
     auto_proxy: bool = True
     codex_extra_args: list[str] = field(default_factory=list)
+    workspace_cleanup: str = "after-sync-back"
+    workspace_sync_back: str = "never"
 
     def __post_init__(self) -> None:
         if self.agent_bin is None:
@@ -55,6 +59,10 @@ class WorkerConfig:
             self.agent_use_stdin = self.agent_type == "codex" or (
                 self.agent_type == "command-template" and "claude" in agent_name
             )
+        if self.workspace_cleanup not in {"on-success", "always", "never", "after-sync-back"}:
+            raise ValueError("workspace_cleanup must be one of: on-success, always, never, after-sync-back")
+        if self.workspace_sync_back not in {"never", "on-success", "always"}:
+            raise ValueError("workspace_sync_back must be one of: never, on-success, always")
 
 
 def run_worker(config: WorkerConfig) -> None:
@@ -81,6 +89,7 @@ def run_worker(config: WorkerConfig) -> None:
 def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, object]) -> None:
     task_id = int(task["id"])
     print(f"[{config.worker_id}] claimed task {task_id}: {task['title']}")
+    task_started_epoch = time.time()
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     run_dir = config.runtime_dir / f"task-{task_id:04d}-{slugify(str(task['title']))}-{run_stamp}"
     workspace_dir = run_dir / "workspace"
@@ -95,6 +104,7 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
         daemon=True,
     )
     heartbeat_thread.start()
+    execution_status = "released"
 
     try:
         try:
@@ -115,6 +125,7 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
             print(f"[{config.worker_id}] task {task_id} failed before agent completed: {exc}", file=sys.stderr)
             return
         if result["returncode"] == 0:
+            execution_status = "completed"
             completed_task = client.complete(task_id, config.worker_id, result["summary"])
             write_task_result(
                 config=config,
@@ -128,6 +139,7 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
             )
             print(f"[{config.worker_id}] completed task {task_id}")
         else:
+            execution_status = "released"
             released_task = client.release(task_id, config.worker_id, result["summary"])
             write_task_result(
                 config=config,
@@ -143,6 +155,14 @@ def process_task(client: TaskClient, config: WorkerConfig, task: dict[str, objec
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=5)
+        sync_back_succeeded = maybe_sync_workspace_back(
+            config,
+            workspace_dir,
+            logs_dir,
+            execution_status,
+            task_started_epoch,
+        )
+        maybe_cleanup_workspace(config, workspace_dir, execution_status, sync_back_succeeded)
 
 
 def copy_template(template_dir: Path, workspace_dir: Path, runtime_dir: Path) -> None:
@@ -176,6 +196,204 @@ def copy_template(template_dir: Path, workspace_dir: Path, runtime_dir: Path) ->
         return ignored
 
     shutil.copytree(template_dir, workspace_dir, ignore=_ignore)
+
+
+def should_cleanup_workspace(cleanup_mode: str, execution_status: str, sync_back_succeeded: bool = False) -> bool:
+    if cleanup_mode == "always":
+        return True
+    if cleanup_mode == "on-success":
+        return execution_status == "completed"
+    if cleanup_mode == "after-sync-back":
+        return execution_status == "completed" and sync_back_succeeded
+    if cleanup_mode == "never":
+        return False
+    raise ValueError("workspace_cleanup must be one of: on-success, always, never, after-sync-back")
+
+
+def maybe_cleanup_workspace(
+    config: WorkerConfig,
+    workspace_dir: Path,
+    execution_status: str,
+    sync_back_succeeded: bool,
+) -> None:
+    if not should_cleanup_workspace(config.workspace_cleanup, execution_status, sync_back_succeeded):
+        return
+    if not workspace_dir.exists():
+        return
+    try:
+        shutil.rmtree(workspace_dir, ignore_errors=False)
+        print(
+            f"[{config.worker_id}] cleaned workspace ({config.workspace_cleanup}) after {execution_status}: {workspace_dir}"
+        )
+    except Exception as exc:  # pragma: no cover
+        print(f"[{config.worker_id}] cleanup failed for workspace {workspace_dir}: {exc}", file=sys.stderr)
+
+
+def should_sync_workspace_back(sync_mode: str, execution_status: str) -> bool:
+    if sync_mode == "always":
+        return True
+    if sync_mode == "on-success":
+        return execution_status == "completed"
+    if sync_mode == "never":
+        return False
+    raise ValueError("workspace_sync_back must be one of: never, on-success, always")
+
+
+def maybe_sync_workspace_back(
+    config: WorkerConfig,
+    workspace_dir: Path,
+    logs_dir: Path,
+    execution_status: str,
+    task_started_epoch: float,
+) -> bool:
+    if not should_sync_workspace_back(config.workspace_sync_back, execution_status):
+        return False
+    if not workspace_dir.exists():
+        return False
+    if not config.template_dir.exists():
+        print(
+            f"[{config.worker_id}] sync-back skipped, template directory not found: {config.template_dir}",
+            file=sys.stderr,
+        )
+        return False
+    if not config.template_dir.is_dir():
+        print(
+            f"[{config.worker_id}] sync-back skipped, template path is not a directory: {config.template_dir}",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        stats = sync_workspace_to_template(
+            workspace_dir=workspace_dir,
+            template_dir=config.template_dir,
+            task_started_epoch=task_started_epoch,
+        )
+        (logs_dir / "sync_back.json").write_text(json.dumps(stats, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(
+            f"[{config.worker_id}] sync-back completed ({config.workspace_sync_back}): "
+            f"synced={stats['synced_files']} created={stats['created_files']} "
+            f"updated={stats['updated_files']} conflicts={stats['conflict_files']} "
+            f"errors={stats['error_files']}"
+        )
+        return stats["conflict_files"] == 0 and stats["error_files"] == 0
+    except Exception as exc:  # pragma: no cover
+        print(f"[{config.worker_id}] sync-back failed for workspace {workspace_dir}: {exc}", file=sys.stderr)
+        return False
+
+
+def sync_workspace_to_template(
+    workspace_dir: Path,
+    template_dir: Path,
+    task_started_epoch: float,
+    lock_timeout_seconds: int = 60,
+) -> dict[str, int]:
+    lock_path = template_dir / ".codex-orchestrator-sync-back.lock"
+    stats = {
+        "scanned_files": 0,
+        "synced_files": 0,
+        "created_files": 0,
+        "updated_files": 0,
+        "conflict_files": 0,
+        "error_files": 0,
+    }
+    with _exclusive_file_lock(lock_path, timeout_seconds=lock_timeout_seconds):
+        for workspace_file in workspace_dir.rglob("*"):
+            if not workspace_file.is_file():
+                continue
+            relative_path = workspace_file.relative_to(workspace_dir)
+            target_file = template_dir / relative_path
+            stats["scanned_files"] += 1
+            try:
+                if not _file_needs_sync(workspace_file, target_file):
+                    continue
+                if target_file.exists() and _target_changed_after_task_start(target_file, task_started_epoch):
+                    stats["conflict_files"] += 1
+                    continue
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+                target_existed = target_file.exists()
+                shutil.copy2(workspace_file, target_file)
+                stats["synced_files"] += 1
+                if target_existed:
+                    stats["updated_files"] += 1
+                else:
+                    stats["created_files"] += 1
+            except Exception:
+                stats["error_files"] += 1
+    return stats
+
+
+def _file_needs_sync(workspace_file: Path, target_file: Path) -> bool:
+    if not target_file.exists():
+        return True
+    if not target_file.is_file():
+        return True
+    workspace_stat = workspace_file.stat()
+    target_stat = target_file.stat()
+    if workspace_stat.st_size != target_stat.st_size:
+        return True
+    if workspace_stat.st_mtime_ns == target_stat.st_mtime_ns:
+        return False
+    return _sha256_file(workspace_file) != _sha256_file(target_file)
+
+
+def _target_changed_after_task_start(target_file: Path, task_started_epoch: float) -> bool:
+    try:
+        return target_file.stat().st_mtime > task_started_epoch
+    except FileNotFoundError:
+        return False
+
+
+def _sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+@contextmanager
+def _exclusive_file_lock(lock_path: Path, timeout_seconds: int = 60):
+    start = time.time()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            os.write(fd, str(os.getpid()).encode("utf-8", errors="ignore"))
+            break
+        except FileExistsError:
+            _clear_stale_lock(lock_path, stale_after_seconds=max(timeout_seconds * 2, 120))
+            if time.time() - start >= timeout_seconds:
+                raise TimeoutError(f"failed to acquire sync-back lock within {timeout_seconds}s: {lock_path}")
+            time.sleep(0.2)
+    try:
+        yield
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _clear_stale_lock(lock_path: Path, stale_after_seconds: int) -> None:
+    try:
+        age_seconds = time.time() - lock_path.stat().st_mtime
+    except FileNotFoundError:
+        return
+    if age_seconds < stale_after_seconds:
+        return
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        return
 
 
 def build_prompt(task: dict[str, object]) -> str:

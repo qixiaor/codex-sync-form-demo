@@ -298,7 +298,7 @@ def _build_status_aliases(options: dict[str, Any]) -> dict[str, str]:
 def _normalize_status(status: str, aliases: dict[str, str]) -> str:
     status = status.strip()
     if not status:
-        return STATUS_PENDING
+        return ""
     return aliases.get(status, status)
 
 

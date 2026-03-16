@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 from pathlib import Path
 
@@ -77,6 +78,16 @@ def _add_worker_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--proxy-url")
     parser.add_argument("--disable-auto-proxy", action="store_true")
     parser.add_argument("--codex-arg", action="append", default=[])
+    parser.add_argument(
+        "--workspace-cleanup",
+        choices=["on-success", "always", "never", "after-sync-back"],
+        default="after-sync-back",
+    )
+    parser.add_argument(
+        "--workspace-sync-back",
+        choices=["never", "on-success", "always"],
+        default="never",
+    )
 
 
 def _add_sync_args(parser: argparse.ArgumentParser) -> None:
@@ -103,12 +114,16 @@ def main() -> None:
         return
 
     if args.command == "worker":
+        try:
+            template_dir = _resolve_existing_dir(args.template_dir, "--template-dir")
+        except ValueError as exc:
+            parser.error(str(exc))
         runtime_dir = Path(args.runtime_dir).resolve()
         results_dir = Path(args.results_dir).resolve() if args.results_dir else _default_results_dir(runtime_dir)
         config = WorkerConfig(
             server_url=args.server_url,
             worker_id=args.worker_id,
-            template_dir=Path(args.template_dir).resolve(),
+            template_dir=template_dir,
             runtime_dir=runtime_dir,
             results_dir=results_dir,
             agent_type=args.agent_type,
@@ -127,17 +142,23 @@ def main() -> None:
             proxy_url=args.proxy_url,
             auto_proxy=not args.disable_auto_proxy,
             codex_extra_args=args.codex_arg,
+            workspace_cleanup=args.workspace_cleanup,
+            workspace_sync_back=args.workspace_sync_back,
         )
         run_worker(config)
         return
 
     if args.command == "pool":
+        try:
+            template_dir = _resolve_existing_dir(args.template_dir, "--template-dir")
+        except ValueError as exc:
+            parser.error(str(exc))
         runtime_dir = Path(args.runtime_dir).resolve()
         results_dir = Path(args.results_dir).resolve() if args.results_dir else _default_results_dir(runtime_dir)
         run_pool(
             worker_count=args.workers,
             server_url=args.server_url,
-            template_dir=Path(args.template_dir).resolve(),
+            template_dir=template_dir,
             runtime_dir=runtime_dir,
             results_dir=results_dir,
             agent_type=args.agent_type,
@@ -156,6 +177,8 @@ def main() -> None:
             proxy_url=args.proxy_url,
             auto_proxy=not args.disable_auto_proxy,
             codex_extra_args=args.codex_arg,
+            workspace_cleanup=args.workspace_cleanup,
+            workspace_sync_back=args.workspace_sync_back,
         )
         return
 
@@ -177,6 +200,28 @@ def _default_results_dir(runtime_dir: Path) -> Path:
     if runtime_dir.name.startswith("worker-"):
         return (runtime_dir.parent / "task-results").resolve()
     return (runtime_dir / "task-results").resolve()
+
+
+def _resolve_existing_dir(path_text: str, arg_name: str) -> Path:
+    candidate = Path(path_text).expanduser()
+    resolved = candidate.resolve()
+    if resolved.is_dir():
+        return resolved
+    if resolved.exists():
+        raise ValueError(f"{arg_name} must point to a directory: {resolved}")
+
+    parent = resolved.parent
+    suggestion = ""
+    if parent.is_dir():
+        sibling_dirs = [item.name for item in parent.iterdir() if item.is_dir()]
+        matches = difflib.get_close_matches(resolved.name, sibling_dirs, n=1, cutoff=0.6)
+        if matches:
+            suggestion = str((parent / matches[0]).resolve())
+
+    message = f"{arg_name} not found: {resolved}"
+    if suggestion:
+        message += f" (did you mean: {suggestion})"
+    raise ValueError(message)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ def run_pool(
     proxy_url: str | None,
     auto_proxy: bool,
     codex_extra_args: list[str],
+    workspace_cleanup: str,
+    workspace_sync_back: str,
 ) -> None:
     runtime_dir.mkdir(parents=True, exist_ok=True)
     processes: dict[int, subprocess.Popen[str]] = {}
@@ -55,6 +57,8 @@ def run_pool(
                 proxy_url=proxy_url,
                 auto_proxy=auto_proxy,
                 codex_extra_args=codex_extra_args,
+                workspace_cleanup=workspace_cleanup,
+                workspace_sync_back=workspace_sync_back,
             )
 
         while True:
@@ -86,6 +90,8 @@ def run_pool(
                     proxy_url=proxy_url,
                     auto_proxy=auto_proxy,
                     codex_extra_args=codex_extra_args,
+                    workspace_cleanup=workspace_cleanup,
+                    workspace_sync_back=workspace_sync_back,
                 )
     except KeyboardInterrupt:
         pass
@@ -122,6 +128,8 @@ def _spawn_worker(
     proxy_url: str | None,
     auto_proxy: bool,
     codex_extra_args: list[str],
+    workspace_cleanup: str,
+    workspace_sync_back: str,
 ) -> subprocess.Popen[str]:
     worker_runtime = runtime_dir / f"worker-{index}"
     worker_runtime.mkdir(parents=True, exist_ok=True)
@@ -154,6 +162,10 @@ def _spawn_worker(
         agent_bin,
         "--agent-timeout-seconds",
         str(agent_timeout_seconds),
+        "--workspace-cleanup",
+        workspace_cleanup,
+        "--workspace-sync-back",
+        workspace_sync_back,
     ]
     if agent_model:
         command.extend(["--agent-model", agent_model])

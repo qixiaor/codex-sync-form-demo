@@ -2,10 +2,13 @@ import tempfile
 import threading
 import unittest
 import os
+import shutil
+import time
 from pathlib import Path
 from unittest import mock
 
 from codex_orchestrator.network import apply_process_proxy
+from codex_orchestrator.__main__ import _resolve_existing_dir
 from codex_orchestrator.store import TaskStore
 from codex_orchestrator.sync_providers import (
     DingTalkBaseProvider,
@@ -26,6 +29,9 @@ from codex_orchestrator.worker import (
     default_agent_command_template,
     load_agent_command_template,
     resolve_codex_launcher,
+    should_sync_workspace_back,
+    sync_workspace_to_template,
+    should_cleanup_workspace,
     write_task_result,
 )
 
@@ -120,6 +126,80 @@ class TaskStoreTests(unittest.TestCase):
             self.assertFalse((workspace_dir / "temp.db-wal").exists())
             self.assertFalse((workspace_dir / "temp.db-shm").exists())
 
+    def test_should_cleanup_workspace_on_success(self) -> None:
+        self.assertTrue(should_cleanup_workspace("on-success", "completed"))
+        self.assertFalse(should_cleanup_workspace("on-success", "released"))
+
+    def test_should_cleanup_workspace_always(self) -> None:
+        self.assertTrue(should_cleanup_workspace("always", "completed"))
+        self.assertTrue(should_cleanup_workspace("always", "released"))
+
+    def test_should_cleanup_workspace_never(self) -> None:
+        self.assertFalse(should_cleanup_workspace("never", "completed"))
+        self.assertFalse(should_cleanup_workspace("never", "released"))
+
+    def test_should_cleanup_workspace_after_sync_back(self) -> None:
+        self.assertTrue(should_cleanup_workspace("after-sync-back", "completed", True))
+        self.assertFalse(should_cleanup_workspace("after-sync-back", "completed", False))
+        self.assertFalse(should_cleanup_workspace("after-sync-back", "released", True))
+
+    def test_should_sync_workspace_back_modes(self) -> None:
+        self.assertFalse(should_sync_workspace_back("never", "completed"))
+        self.assertTrue(should_sync_workspace_back("always", "released"))
+        self.assertTrue(should_sync_workspace_back("on-success", "completed"))
+        self.assertFalse(should_sync_workspace_back("on-success", "released"))
+
+    def test_sync_workspace_to_template_syncs_changed_and_new_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            template_dir = root / "template"
+            workspace_dir = root / "workspace"
+            template_dir.mkdir()
+            (template_dir / "a.txt").write_text("old", encoding="utf-8")
+            shutil.copytree(template_dir, workspace_dir)
+
+            (workspace_dir / "a.txt").write_text("new", encoding="utf-8")
+            (workspace_dir / "b.txt").write_text("add", encoding="utf-8")
+            task_started_epoch = time.time()
+
+            stats = sync_workspace_to_template(
+                workspace_dir=workspace_dir,
+                template_dir=template_dir,
+                task_started_epoch=task_started_epoch,
+            )
+
+            self.assertEqual("new", (template_dir / "a.txt").read_text(encoding="utf-8"))
+            self.assertEqual("add", (template_dir / "b.txt").read_text(encoding="utf-8"))
+            self.assertEqual(2, stats["synced_files"])
+            self.assertEqual(1, stats["updated_files"])
+            self.assertEqual(1, stats["created_files"])
+            self.assertEqual(0, stats["conflict_files"])
+
+    def test_sync_workspace_to_template_skips_conflict_if_target_changed_after_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            template_dir = root / "template"
+            workspace_dir = root / "workspace"
+            template_dir.mkdir()
+            source_file = template_dir / "a.txt"
+            source_file.write_text("source-new", encoding="utf-8")
+            shutil.copytree(template_dir, workspace_dir)
+
+            (workspace_dir / "a.txt").write_text("workspace-new", encoding="utf-8")
+            task_started_epoch = time.time() - 60
+            future_time = task_started_epoch + 120
+            os.utime(source_file, (future_time, future_time))
+
+            stats = sync_workspace_to_template(
+                workspace_dir=workspace_dir,
+                template_dir=template_dir,
+                task_started_epoch=task_started_epoch,
+            )
+
+            self.assertEqual("source-new", source_file.read_text(encoding="utf-8"))
+            self.assertEqual(0, stats["synced_files"])
+            self.assertEqual(1, stats["conflict_files"])
+
     def test_resolve_codex_launcher_uses_cmd_on_windows(self) -> None:
         with mock.patch("codex_orchestrator.worker.shutil.which", return_value=r"E:\nodejs\codex.cmd"):
             self.assertEqual([r"E:\nodejs\codex.cmd"], resolve_codex_launcher("codex"))
@@ -183,6 +263,7 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(321, config.agent_timeout_seconds)
         self.assertEqual(["--foo"], config.agent_extra_args)
         self.assertTrue(config.agent_use_stdin)
+        self.assertEqual("after-sync-back", config.workspace_cleanup)
 
     def test_worker_config_defaults_claude_command_template_to_stdin(self) -> None:
         config = WorkerConfig(
@@ -195,6 +276,28 @@ class TaskStoreTests(unittest.TestCase):
             agent_bin="claude.cmd",
         )
         self.assertTrue(config.agent_use_stdin)
+
+    def test_worker_config_rejects_invalid_workspace_cleanup(self) -> None:
+        with self.assertRaises(ValueError):
+            WorkerConfig(
+                server_url="http://127.0.0.1:8000",
+                worker_id="worker-0",
+                template_dir=Path("."),
+                runtime_dir=Path(".codex-runtime"),
+                results_dir=Path(".codex-runtime/task-results"),
+                workspace_cleanup="invalid-mode",
+            )
+
+    def test_worker_config_rejects_invalid_workspace_sync_back(self) -> None:
+        with self.assertRaises(ValueError):
+            WorkerConfig(
+                server_url="http://127.0.0.1:8000",
+                worker_id="worker-0",
+                template_dir=Path("."),
+                runtime_dir=Path(".codex-runtime"),
+                results_dir=Path(".codex-runtime/task-results"),
+                workspace_sync_back="invalid-mode",
+            )
 
     def test_load_agent_command_template_accepts_json_array(self) -> None:
         template = load_agent_command_template('["claude", "-p", "{prompt_path}"]')
@@ -565,6 +668,37 @@ class TaskStoreTests(unittest.TestCase):
             tasks,
         )
 
+    def test_google_provider_skips_rows_with_blank_status(self) -> None:
+        provider = GoogleSheetsProvider(
+            ProviderConfig(
+                provider="google-sheets",
+                name="sheet-demo",
+                options={
+                    "spreadsheet_id": "sheet-id",
+                    "sheet_name": "Sheet1",
+                    "api_key": "api-key",
+                },
+            )
+        )
+        with mock.patch.object(
+            provider,
+            "_request_json",
+            return_value={
+                "values": [
+                    ["标题", "任务详情", "状态"],
+                    ["任务一", "详情一", ""],
+                    ["任务二", "详情二", "未开始"],
+                ]
+            },
+        ):
+            tasks = provider.list_tasks()
+        self.assertEqual(
+            [
+                SourceTask(source_task_key="3", title="任务二", detail="详情二", status="未开始"),
+            ],
+            tasks,
+        )
+
     def test_google_provider_uses_service_account_file(self) -> None:
         credentials = mock.Mock()
         credentials.valid = False
@@ -681,6 +815,55 @@ class TaskStoreTests(unittest.TestCase):
             call_mcp_tool.call_args_list[1],
         )
 
+    def test_dingtalk_base_provider_skips_blank_status_records(self) -> None:
+        with mock.patch(
+            "codex_orchestrator.sync_providers._call_mcp_tool_with_fallbacks",
+            return_value={
+                "success": True,
+                "result": {
+                    "hasMore": False,
+                    "cursor": "",
+                    "records": [
+                        {
+                            "id": "record-1",
+                            "fields": {
+                                "标题": "任务一",
+                                "任务详情": "详情一",
+                                "状态": "",
+                            },
+                        },
+                        {
+                            "id": "record-2",
+                            "fields": {
+                                "标题": "任务二",
+                                "任务详情": "详情二",
+                                "状态": "未开始",
+                            },
+                        },
+                    ],
+                },
+            },
+        ):
+            provider = DingTalkBaseProvider(
+                ProviderConfig(
+                    provider="dingtalk-base",
+                    name="dingtalk-demo",
+                    options={
+                        "mcp_url": "https://example.com/mcp",
+                        "dentry_uuid": "doc-id",
+                        "sheet_id_or_name": "Sheet1",
+                    },
+                )
+            )
+            tasks = provider.list_tasks()
+
+        self.assertEqual(
+            [
+                SourceTask(source_task_key="record-2", title="任务二", detail="详情二", status="未开始"),
+            ],
+            tasks,
+        )
+
     def test_dingtalk_base_provider_updates_status(self) -> None:
         with mock.patch(
             "codex_orchestrator.sync_providers._call_mcp_tool_with_fallbacks",
@@ -787,6 +970,27 @@ class TaskStoreTests(unittest.TestCase):
                 sync_service.sync_loop("tasks.db", "provider.json", 1)
 
         create_provider.assert_called_once()
+
+    def test_resolve_existing_dir_accepts_existing_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resolved = _resolve_existing_dir(tmpdir, "--template-dir")
+            self.assertEqual(Path(tmpdir).resolve(), resolved)
+
+    def test_resolve_existing_dir_rejects_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "a.txt"
+            file_path.write_text("x", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                _resolve_existing_dir(str(file_path), "--template-dir")
+
+    def test_resolve_existing_dir_provides_similar_dir_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "campus-runner-server").mkdir()
+            with self.assertRaises(ValueError) as context:
+                _resolve_existing_dir(str(root / "campus-runner-serve"), "--template-dir")
+            self.assertIn("did you mean", str(context.exception))
+            self.assertIn("campus-runner-server", str(context.exception))
 
 
 if __name__ == "__main__":
