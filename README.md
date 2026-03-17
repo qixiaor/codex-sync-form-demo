@@ -93,19 +93,40 @@ agent CLI
 
 worker 不需要知道这些工具细节。
 
-## 启动顺序
+## 推荐启动
 
-推荐固定按这个顺序启动。
+推荐优先使用统一配置文件 + 单命令启动，而不是手工维护 3 条命令。
 
 示例 MySQL URL：
 
-`mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4`
+`mysql://root:password@127.0.0.1:3306/agent_tasks?charset=utf8mb4`
 
 使用 MySQL 前需要：
 
 1. `python -m pip install pymysql`
-2. 先创建数据库，例如 `codex_tasks`
+2. 先创建数据库，例如 `agent_tasks`
 3. 确认 `--db` 使用的是可连接的 MySQL URL
+
+统一启动配置示例：
+
+- [`examples/stack.google-sheets.json`](/f:/work/codexSyncDemo/examples/stack.google-sheets.json)
+- [`examples/stack.dingtalk-base.json`](/f:/work/codexSyncDemo/examples/stack.dingtalk-base.json)
+
+最常用的启动方式：
+
+```powershell
+python -m codex_orchestrator stack run --config .\examples\stack.dingtalk-base.json
+```
+
+如果你想先检查最终会执行哪些命令：
+
+```powershell
+python -m codex_orchestrator stack print --config .\examples\stack.dingtalk-base.json
+```
+
+## 分步启动
+
+如果你要单独调试某个环节，再使用下面这 3 个底层命令。
 
 ### 1. 启动本地任务服务
 
@@ -184,6 +205,59 @@ python -m codex_orchestrator pool `
 - 回写时会加文件锁，避免多个 worker 同时写主项目；若主项目文件在任务执行期间已被外部修改，该文件会标记冲突并跳过。
 
 另外，当前没有对外暴露 `--cwd` 参数；worker 内部会自动把每个任务子进程的 `cwd` 设为该任务 `workspace`。
+
+## `stack.*.json` 参数说明
+
+统一启动配置文件分 4 段：
+
+```json
+{
+  "database_url": "mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4",
+  "serve": {
+    "host": "127.0.0.1",
+    "port": 8000
+  },
+  "sync": {
+    "config": "./dingtalk-base.sync.json",
+    "interval_seconds": 15,
+    "proxy_url": "http://127.0.0.1:7890"
+  },
+  "pool": {
+    "workers": 3,
+    "template_dir": "..",
+    "runtime_dir": "../.codex-runtime",
+    "agent_type": "command-template",
+    "agent_bin": "claude.cmd",
+    "agent_timeout_seconds": 900,
+    "server_timeout_seconds": 10,
+    "workspace_cleanup": "after-sync-back",
+    "workspace_sync_back": "on-success",
+    "proxy_url": "http://127.0.0.1:7890"
+  }
+}
+```
+
+常用字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `database_url` | MySQL URL，`serve` 和 `sync` 共用 |
+| `serve.host` | 本地 HTTP 服务监听地址 |
+| `serve.port` | 本地 HTTP 服务端口 |
+| `sync.config` | 同步源配置文件路径，支持相对 `stack.json` |
+| `sync.interval_seconds` | 同步轮询间隔 |
+| `sync.proxy_url` | 同步进程代理 |
+| `pool.workers` | worker 数量 |
+| `pool.template_dir` | 任务模板目录，支持相对 `stack.json` |
+| `pool.runtime_dir` | worker 运行目录，支持相对 `stack.json` |
+| `pool.agent_type` | `codex` 或 `command-template` |
+| `pool.agent_bin` | 智能体 CLI，例如 `codex.cmd`、`claude.cmd` |
+| `pool.agent_timeout_seconds` | 单任务超时 |
+| `pool.workspace_cleanup` | workspace 清理策略 |
+| `pool.workspace_sync_back` | 成功后是否回写主项目 |
+| `pool.proxy_url` | worker / agent 代理 |
+
+相对路径都会按 `stack.json` 所在目录解析，不再要求你在固定 cwd 下启动。
 
 ### 4. 验证状态流转
 

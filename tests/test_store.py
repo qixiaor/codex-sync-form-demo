@@ -5,12 +5,14 @@ import os
 import shutil
 import time
 import io
+import json
 from pathlib import Path
 from unittest import mock
 from contextlib import redirect_stderr
 
 from codex_orchestrator.network import apply_process_proxy
 from codex_orchestrator.__main__ import _resolve_existing_dir, build_parser
+from codex_orchestrator.stack import build_stack_process_specs
 from codex_orchestrator.store import TaskStore, _parse_db_target
 from codex_orchestrator.sync_providers import (
     DingTalkBaseProvider,
@@ -1070,6 +1072,44 @@ class TaskStoreTests(unittest.TestCase):
                 parser.parse_args(["serve"])
             with self.assertRaises(SystemExit):
                 parser.parse_args(["sync", "once", "--config", "provider.json"])
+
+    def test_build_stack_process_specs_resolves_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "repo").mkdir()
+            (root / "providers").mkdir()
+            (root / "providers" / "sheet.json").write_text("{}", encoding="utf-8")
+            config_path = root / "stack.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "database_url": "mysql://root:root@127.0.0.1:3306/agent_tasks?charset=utf8mb4",
+                        "serve": {"host": "127.0.0.1", "port": 8123},
+                        "sync": {"config": "./providers/sheet.json", "interval_seconds": 9},
+                        "pool": {
+                            "workers": 4,
+                            "template_dir": "./repo",
+                            "runtime_dir": "./runtime",
+                            "agent_type": "command-template",
+                            "agent_bin": "claude.cmd",
+                            "agent_timeout_seconds": 123,
+                            "proxy_url": "http://127.0.0.1:7890",
+                        },
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            specs = build_stack_process_specs(config_path)
+
+            self.assertEqual(["serve", "sync", "pool"], [spec.name for spec in specs])
+            self.assertIn("mysql://root:root@127.0.0.1:3306/agent_tasks?charset=utf8mb4", specs[0].command)
+            self.assertIn(str((root / "providers" / "sheet.json").resolve()), specs[1].command)
+            self.assertIn(str((root / "repo").resolve()), specs[2].command)
+            self.assertIn(str((root / "runtime").resolve()), specs[2].command)
+            self.assertIn("http://127.0.0.1:8123", specs[2].command)
 
 
 if __name__ == "__main__":

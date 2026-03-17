@@ -1,0 +1,24 @@
+{
+  "database_url": "mysql://root:password@127.0.0.1:3306/agent_tasks?charset=utf8mb4",
+  "serve": {
+    "host": "127.0.0.1",
+    "port": 8000
+  },
+  "sync": {
+    "config": "./dingtalk-base.sync.json",
+    "interval_seconds": 15,
+    "proxy_url": "http://127.0.0.1:7890"
+  },
+  "pool": {
+    "workers": 3,
+    "template_dir": "..",
+    "runtime_dir": "../.agent-runtime",
+    "agent_type": "command-template",
+    "agent_bin": "claude.cmd",
+    "agent_timeout_seconds": 900,
+    "server_timeout_seconds": 10,
+    "workspace_cleanup": "after-sync-back",
+    "workspace_sync_back": "on-success",
+    "proxy_url": "http://127.0.0.1:7890"
+  }
+}

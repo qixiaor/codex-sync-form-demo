@@ -9,6 +9,7 @@ from .client import TaskClient
 from .network import apply_process_proxy
 from .pool import run_pool
 from .server import serve_forever
+from .stack import print_stack, run_stack
 from .sync_service import sync_loop, sync_once
 from .worker import WorkerConfig, run_worker
 
@@ -51,6 +52,15 @@ def build_parser() -> argparse.ArgumentParser:
     sync_loop_parser.add_argument("--config", required=True)
     sync_loop_parser.add_argument("--interval-seconds", type=int, default=15)
     _add_sync_args(sync_loop_parser)
+
+    stack_parser = subparsers.add_parser("stack", help="run the full stack from one config file")
+    stack_subparsers = stack_parser.add_subparsers(dest="stack_command", required=True)
+
+    stack_run_parser = stack_subparsers.add_parser("run", help="start serve + sync + pool from one config file")
+    stack_run_parser.add_argument("--config", required=True)
+
+    stack_print_parser = stack_subparsers.add_parser("print", help="print resolved commands from one config file")
+    stack_print_parser.add_argument("--config", required=True)
 
     return parser
 
@@ -191,6 +201,14 @@ def main() -> None:
             return
         if args.sync_command == "loop":
             sync_loop(args.db, args.config, args.interval_seconds)
+            return
+
+    if args.command == "stack":
+        if args.stack_command == "run":
+            run_stack(args.config)
+            return
+        if args.stack_command == "print":
+            print_stack(args.config)
             return
 
     parser.error("unknown command")
