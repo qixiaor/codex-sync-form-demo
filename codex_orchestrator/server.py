@@ -221,8 +221,8 @@ class TaskRequestHandler(BaseHTTPRequestHandler):
       </form>
     </div>
     <div class="card danger">
-      <strong>整表重置</strong>
-      <form method="post" action="/admin/reset" onsubmit="return confirm('确认删除本地 SQLite 中的全部任务？')">
+        <strong>整表重置</strong>
+      <form method="post" action="/admin/reset" onsubmit="return confirm('确认删除本地 MySQL 中的全部任务？')">
         <input type="hidden" name="scope" value="all">
         <p>这不会直接删除在线表格，但下次 `sync` 会重新导入在线任务。</p>
         <button type="submit">清空本地任务表</button>

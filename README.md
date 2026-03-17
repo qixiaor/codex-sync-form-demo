@@ -2,7 +2,7 @@
 
 这个程序做 3 件事：
 
-1. 从在线表格同步任务到本地 SQLite
+1. 从在线表格同步任务到线上 MySQL
 2. 用多个全新的 `codex exec` 会话并发执行任务
 3. 把本地任务状态再回写到在线表格
 
@@ -30,7 +30,7 @@
 整套程序通常有 3 个长期进程：
 
 1. `serve`
-   本地任务服务，负责 SQLite 和本地 HTTP API
+   本地任务服务，负责 MySQL 和本地 HTTP API
 2. `sync loop`
    在线表格同步进程，负责导入任务和回写状态
 3. `pool`
@@ -38,9 +38,9 @@
 
 关系是：
 
-`在线表格 <-> sync loop <-> SQLite / 本地任务服务 <-> worker pool <-> agent CLI`
+`在线表格 <-> sync loop <-> MySQL / 本地任务服务 <-> worker pool <-> agent CLI`
 
-并发控制只在本地 SQLite 里做。在线表格不负责抢任务。
+并发控制只在 MySQL 里做。在线表格不负责抢任务。
 
 ## MCP 接入思路
 
@@ -49,7 +49,7 @@ MCP 在这个项目里不是交给每个 worker 去“自主探索”的。
 当前设计是：
 
 - 由代码里的 provider 主动调用 MCP
-- worker 只执行本地 SQLite 里已经领取到的任务
+- worker 只执行 MySQL 里已经领取到的任务
 - 不让每个智能体自己决定该调用 MCP 里的哪个 tool
 
 可以把它理解成“代码调用一个外部能力服务”，而不是“把 MCP 当作开放工具箱直接交给 agent”。
@@ -69,7 +69,7 @@ sync loop
    ^
    |  upsert / writeback
    v
-SQLite / 本地任务服务
+MySQL / 本地任务服务
    ^
    |  claim / complete / release
    v
@@ -97,10 +97,20 @@ worker 不需要知道这些工具细节。
 
 推荐固定按这个顺序启动。
 
+示例 MySQL URL：
+
+`mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4`
+
+使用 MySQL 前需要：
+
+1. `python -m pip install pymysql`
+2. 先创建数据库，例如 `codex_tasks`
+3. 确认 `--db` 使用的是可连接的 MySQL URL
+
 ### 1. 启动本地任务服务
 
 ```powershell
-python -m codex_orchestrator serve --host 127.0.0.1 --port 8000 --db .codex-runtime/tasks.db
+python -m codex_orchestrator serve --host 127.0.0.1 --port 8000 --db "mysql://root:password@127.0.0.1:3306/agent_tasks?charset=utf8mb4"
 ```
 
 这个进程启动后，可以访问：
@@ -115,7 +125,7 @@ Google Sheets 示例：
 
 ```powershell
 python -m codex_orchestrator sync loop `
-  --db .codex-runtime/tasks.db `
+  --db "mysql://root:password@127.0.0.1:3306/agent_tasks?charset=utf8mb4" `
   --config .\examples\google-sheets.sync.json `
   --interval-seconds 15 `
   --proxy-url http://127.0.0.1:7890
@@ -125,7 +135,7 @@ python -m codex_orchestrator sync loop `
 
 ```powershell
 python -m codex_orchestrator sync loop `
-  --db .codex-runtime/tasks.db `
+  --db "mysql://root:password@127.0.0.1:3306/agent_tasks?charset=utf8mb4" `
   --config .\examples\dingtalk-base.sync.json `
   --interval-seconds 15 `
   --proxy-url http://127.0.0.1:7890
@@ -135,14 +145,7 @@ python -m codex_orchestrator sync loop `
 
 ```powershell
 python -m codex_orchestrator sync once `
-  --db .codex-runtime/tasks.db `
-  --config .\examples\google-sheets.sync.json `
-  --proxy-url http://127.0.0.1:7890
-```
-
-```powershell
-python -m codex_orchestrator sync once `
-  --db .codex-runtime/tasks.db `
+  --db "mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4" `
   --config .\examples\dingtalk-base.sync.json `
   --proxy-url http://127.0.0.1:7890
 ```
@@ -289,14 +292,14 @@ python -m codex_orchestrator pool `
 本地服务：
 
 ```powershell
-python -m codex_orchestrator serve --host 127.0.0.1 --port 8000 --db .codex-runtime/tasks.db
+python -m codex_orchestrator serve --host 127.0.0.1 --port 8000 --db "mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4"
 ```
 
 Google Sheets 单次同步：
 
 ```powershell
 python -m codex_orchestrator sync once `
-  --db .codex-runtime/tasks.db `
+  --db "mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4" `
   --config .\examples\google-sheets.sync.json `
   --proxy-url http://127.0.0.1:7890
 ```
@@ -305,7 +308,7 @@ Google Sheets 持续同步：
 
 ```powershell
 python -m codex_orchestrator sync loop `
-  --db .codex-runtime/tasks.db `
+  --db "mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4" `
   --config .\examples\google-sheets.sync.json `
   --interval-seconds 15 `
   --proxy-url http://127.0.0.1:7890
@@ -315,7 +318,7 @@ python -m codex_orchestrator sync loop `
 
 ```powershell
 python -m codex_orchestrator sync once `
-  --db .codex-runtime/tasks.db `
+  --db "mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4" `
   --config .\examples\dingtalk-base.sync.json `
   --proxy-url http://127.0.0.1:7890
 ```
@@ -324,7 +327,7 @@ python -m codex_orchestrator sync once `
 
 ```powershell
 python -m codex_orchestrator sync loop `
-  --db .codex-runtime/tasks.db `
+  --db "mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4" `
   --config .\examples\dingtalk-base.sync.json `
   --interval-seconds 15 `
   --proxy-url http://127.0.0.1:7890
@@ -355,11 +358,11 @@ python -m codex_orchestrator pool `
   --server-url http://127.0.0.1:8000 `
   --workers 3 `
   --template-dir . `
-  --runtime-dir .codex-runtime `
+  --runtime-dir .claude-runtime `
   --agent-type command-template `
-  --agent-bin claude `
-  --agent-command-template '["{agent_bin}","--print","--prompt-file","{prompt_path}","--output","{final_message_path}"]' `
-  --agent-no-stdin `
+  --agent-bin claude.cmd `
+  --agent-timeout-seconds 900 `
+  --server-timeout-seconds 10 `
   --proxy-url http://127.0.0.1:7890
 ```
 
@@ -381,7 +384,7 @@ python -m codex_orchestrator pool `
 
 ## 目录说明
 
-- `.codex-runtime/tasks.db`: 本地任务数据库
+- `--db`: MySQL URL，例如 `mysql://root:password@127.0.0.1:3306/codex_tasks?charset=utf8mb4`
 - `.codex-runtime/worker-*/task-*/workspace`: 每个任务的独立工作区
 - `.codex-runtime/worker-*/task-*/logs`: `codex` 执行日志
 - `.codex-runtime/task-results/task-*.json|txt`: 按任务编号输出的结果摘要

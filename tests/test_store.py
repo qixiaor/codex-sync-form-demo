@@ -4,12 +4,14 @@ import unittest
 import os
 import shutil
 import time
+import io
 from pathlib import Path
 from unittest import mock
+from contextlib import redirect_stderr
 
 from codex_orchestrator.network import apply_process_proxy
-from codex_orchestrator.__main__ import _resolve_existing_dir
-from codex_orchestrator.store import TaskStore
+from codex_orchestrator.__main__ import _resolve_existing_dir, build_parser
+from codex_orchestrator.store import TaskStore, _parse_db_target
 from codex_orchestrator.sync_providers import (
     DingTalkBaseProvider,
     GoogleSheetsProvider,
@@ -1046,6 +1048,28 @@ class TaskStoreTests(unittest.TestCase):
                 _resolve_existing_dir(str(root / "campus-runner-serve"), "--template-dir")
             self.assertIn("did you mean", str(context.exception))
             self.assertIn("campus-runner-server", str(context.exception))
+
+    def test_parse_db_target_supports_mysql_url(self) -> None:
+        dialect, db_path, mysql_config = _parse_db_target(
+            "mysql://demo-user:demo-pass@db.example.com:3307/codex_tasks?charset=utf8mb4&connect_timeout=12"
+        )
+        self.assertEqual("mysql", dialect)
+        self.assertIsNone(db_path)
+        self.assertEqual("db.example.com", mysql_config["host"])
+        self.assertEqual(3307, mysql_config["port"])
+        self.assertEqual("demo-user", mysql_config["user"])
+        self.assertEqual("demo-pass", mysql_config["password"])
+        self.assertEqual("codex_tasks", mysql_config["database"])
+        self.assertEqual("utf8mb4", mysql_config["charset"])
+        self.assertEqual(12, mysql_config["connect_timeout"])
+
+    def test_build_parser_requires_db_for_serve_and_sync(self) -> None:
+        parser = build_parser()
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["serve"])
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["sync", "once", "--config", "provider.json"])
 
 
 if __name__ == "__main__":

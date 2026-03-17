@@ -20,7 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser("serve", help="start the task HTTP server")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)
-    serve_parser.add_argument("--db", default=".codex-runtime/tasks.db")
+    serve_parser.add_argument("--db", required=True, help="MySQL URL, e.g. mysql://user:pass@host:3306/dbname")
 
     add_parser = subparsers.add_parser("add", help="add a new task")
     add_parser.add_argument("--server-url", required=True)
@@ -42,12 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     sync_subparsers = sync_parser.add_subparsers(dest="sync_command", required=True)
 
     sync_once_parser = sync_subparsers.add_parser("once", help="run one sync cycle")
-    sync_once_parser.add_argument("--db", default=".codex-runtime/tasks.db")
+    sync_once_parser.add_argument("--db", required=True, help="MySQL URL, e.g. mysql://user:pass@host:3306/dbname")
     sync_once_parser.add_argument("--config", required=True)
     _add_sync_args(sync_once_parser)
 
     sync_loop_parser = sync_subparsers.add_parser("loop", help="run sync continuously")
-    sync_loop_parser.add_argument("--db", default=".codex-runtime/tasks.db")
+    sync_loop_parser.add_argument("--db", required=True, help="MySQL URL, e.g. mysql://user:pass@host:3306/dbname")
     sync_loop_parser.add_argument("--config", required=True)
     sync_loop_parser.add_argument("--interval-seconds", type=int, default=15)
     _add_sync_args(sync_loop_parser)
