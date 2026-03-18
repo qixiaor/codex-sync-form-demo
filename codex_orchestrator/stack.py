@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,8 +22,7 @@ def run_stack(config_path: str | Path) -> None:
     processes: dict[str, subprocess.Popen[str]] = {}
     try:
         for spec in specs:
-            print(f"[stack] starting {spec.name}")
-            processes[spec.name] = subprocess.Popen(spec.command, text=True)
+            processes[spec.name] = _spawn_stack_process(spec)
 
         while True:
             time.sleep(2)
@@ -32,7 +32,7 @@ def run_stack(config_path: str | Path) -> None:
                 if exit_code is None:
                     continue
                 print(f"[stack] {spec.name} exited with code {exit_code}, restarting")
-                processes[spec.name] = subprocess.Popen(spec.command, text=True)
+                processes[spec.name] = _spawn_stack_process(spec)
     except KeyboardInterrupt:
         pass
     finally:
@@ -51,6 +51,48 @@ def print_stack(config_path: str | Path) -> list[StackProcessSpec]:
     for spec in specs:
         print(json.dumps({"name": spec.name, "command": spec.command}, ensure_ascii=False, indent=2))
     return specs
+
+
+def _spawn_stack_process(spec: StackProcessSpec) -> subprocess.Popen[str]:
+    print(f"[stack] starting {spec.name}")
+    process = subprocess.Popen(
+        spec.command,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+        encoding="utf-8",
+        errors="replace",
+        env=_build_child_env(),
+    )
+    if process.stdout is not None:
+        thread = threading.Thread(
+            target=_pump_process_output,
+            args=(spec.name, process.stdout),
+            daemon=True,
+        )
+        thread.start()
+    return process
+
+
+def _pump_process_output(name: str, stream: Any) -> None:
+    try:
+        for line in iter(stream.readline, ""):
+            text = line.rstrip("\r\n")
+            if text:
+                print(f"[{name}] {text}")
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            return
+
+
+def _build_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
 
 
 def build_stack_process_specs(config_path: str | Path) -> list[StackProcessSpec]:

@@ -12,7 +12,7 @@ from contextlib import redirect_stderr
 
 from codex_orchestrator.network import apply_process_proxy
 from codex_orchestrator.__main__ import _resolve_existing_dir, build_parser
-from codex_orchestrator.stack import build_stack_process_specs
+from codex_orchestrator.stack import _build_child_env, build_stack_process_specs
 from codex_orchestrator.store import TaskStore, _parse_db_target
 from codex_orchestrator.sync_providers import (
     DingTalkBaseProvider,
@@ -1120,6 +1120,11 @@ class TaskStoreTests(unittest.TestCase):
         formatted = _format_exception(outer)
         self.assertIn("RuntimeError: outer boom", formatted)
         self.assertIn("RuntimeError: inner boom", formatted)
+
+    def test_build_child_env_enables_unbuffered_utf8_output(self) -> None:
+        env = _build_child_env()
+        self.assertEqual("1", env["PYTHONUNBUFFERED"])
+        self.assertEqual("utf-8", env["PYTHONIOENCODING"])
 
 
 if __name__ == "__main__":

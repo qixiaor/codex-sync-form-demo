@@ -118,6 +118,8 @@ worker 不需要知道这些工具细节。
 python -m codex_orchestrator stack run --config .\examples\stack.dingtalk-base.json
 ```
 
+`stack run` 会统一接管 `serve` / `sync` / `pool` 的输出并加上前缀，减少多进程同时写控制台时的日志串行问题。
+
 如果你想先检查最终会执行哪些命令：
 
 ```powershell
