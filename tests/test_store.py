@@ -24,7 +24,7 @@ from codex_orchestrator.sync_providers import (
     _tool_aliases,
     _unwrap_dingtalk_mcp_payload,
 )
-from codex_orchestrator.sync_service import sync_once
+from codex_orchestrator.sync_service import _format_exception, sync_once
 from codex_orchestrator.worker import (
     WorkerConfig,
     build_agent_command,
@@ -1110,6 +1110,16 @@ class TaskStoreTests(unittest.TestCase):
             self.assertIn(str((root / "repo").resolve()), specs[2].command)
             self.assertIn(str((root / "runtime").resolve()), specs[2].command)
             self.assertIn("http://127.0.0.1:8123", specs[2].command)
+
+    def test_format_exception_unwraps_nested_exceptions(self) -> None:
+        try:
+            raise RuntimeError("inner boom")
+        except RuntimeError as inner:
+            outer = RuntimeError("outer boom")
+            outer.__cause__ = inner
+        formatted = _format_exception(outer)
+        self.assertIn("RuntimeError: outer boom", formatted)
+        self.assertIn("RuntimeError: inner boom", formatted)
 
 
 if __name__ == "__main__":

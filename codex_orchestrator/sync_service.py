@@ -42,7 +42,7 @@ def _sync_with_provider(store: TaskStore, provider: SyncProvider) -> dict[str, i
                 writeback_errors += 1
                 print(
                     f"sync writeback failed: source={provider.name} "
-                    f"task_key={task['source_task_key']} status={task['status']} error={exc}",
+                    f"task_key={task['source_task_key']} status={task['status']} error={_format_exception(exc)}",
                     file=sys.stderr,
                 )
 
@@ -61,5 +61,37 @@ def sync_loop(db_path: str | Path, config_path: str | Path, interval_seconds: in
                 f"writeback_errors={result['writeback_errors']} config={config_path}"
             )
         except Exception as exc:
-            print(f"sync failed: config={config_path} error={exc}", file=sys.stderr)
+            print(f"sync failed: config={config_path} error={_format_exception(exc)}", file=sys.stderr)
         time.sleep(interval_seconds)
+
+
+def _format_exception(exc: BaseException) -> str:
+    seen: set[int] = set()
+    parts: list[str] = []
+    _collect_exception_parts(exc, parts, seen)
+    return " | ".join(parts) if parts else f"{type(exc).__name__}: {exc}"
+
+
+def _collect_exception_parts(exc: BaseException, parts: list[str], seen: set[int]) -> None:
+    exc_id = id(exc)
+    if exc_id in seen:
+        return
+    seen.add(exc_id)
+
+    nested = getattr(exc, "exceptions", None)
+    if isinstance(nested, tuple) and nested:
+        parts.append(f"{type(exc).__name__}: {exc}")
+        for child in nested:
+            if isinstance(child, BaseException):
+                _collect_exception_parts(child, parts, seen)
+        return
+
+    message = str(exc).strip()
+    parts.append(f"{type(exc).__name__}: {message or repr(exc)}")
+
+    cause = getattr(exc, "__cause__", None)
+    if isinstance(cause, BaseException):
+        _collect_exception_parts(cause, parts, seen)
+    context = getattr(exc, "__context__", None)
+    if isinstance(context, BaseException):
+        _collect_exception_parts(context, parts, seen)
