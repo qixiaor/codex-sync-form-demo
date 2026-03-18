@@ -500,6 +500,7 @@ class TaskStoreTests(unittest.TestCase):
             )
             self.assertEqual("google-sheet-demo", task["source_name"])
             self.assertEqual("2", task["source_task_key"])
+            self.assertEqual("未开始", task["source_status"])
 
             updated = store.upsert_external_task(
                 source_name="google-sheet-demo",
@@ -512,8 +513,9 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual("sheet task updated", updated["title"])
             self.assertEqual("detail 2", updated["detail"])
             self.assertEqual("已完成", updated["status"])
+            self.assertEqual("已完成", updated["source_status"])
 
-    def test_upsert_external_task_reopens_completed_task_when_source_returns_to_pending(self) -> None:
+    def test_upsert_external_task_does_not_reopen_completed_task_for_stale_source_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = TaskStore(Path(tmpdir) / "tasks.db")
             task = store.upsert_external_task(
@@ -534,7 +536,44 @@ class TaskStoreTests(unittest.TestCase):
                 detail="detail reopened",
                 status="未开始",
             )
+            self.assertEqual("已完成", reopened["status"])
+            self.assertEqual("未开始", reopened["source_status"])
+            self.assertIsNotNone(reopened["completed_at"])
+            self.assertEqual("done", reopened["result_summary"])
+            self.assertEqual("task reopened", reopened["title"])
+
+    def test_upsert_external_task_reopens_completed_task_when_source_returns_to_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = TaskStore(Path(tmpdir) / "tasks.db")
+            task = store.upsert_external_task(
+                source_name="sheet-demo",
+                source_task_key="2",
+                title="task",
+                detail="detail",
+                status="未开始",
+            )
+            claimed = store.claim_next_task("worker-a", lease_seconds=60)
+            self.assertIsNotNone(claimed)
+            completed = store.complete_task(int(task["id"]), "worker-a", "done")
+            self.assertIsNotNone(completed)
+            synced_done = store.upsert_external_task(
+                source_name="sheet-demo",
+                source_task_key="2",
+                title="task synced",
+                detail="detail synced",
+                status="已完成",
+            )
+            self.assertEqual("已完成", synced_done["status"])
+            self.assertEqual("已完成", synced_done["source_status"])
+            reopened = store.upsert_external_task(
+                source_name="sheet-demo",
+                source_task_key="2",
+                title="task reopened",
+                detail="detail reopened",
+                status="未开始",
+            )
             self.assertEqual("未开始", reopened["status"])
+            self.assertEqual("未开始", reopened["source_status"])
             self.assertIsNone(reopened["completed_at"])
             self.assertIsNone(reopened["result_summary"])
             self.assertEqual("task reopened", reopened["title"])
@@ -558,6 +597,7 @@ class TaskStoreTests(unittest.TestCase):
             )
             self.assertEqual(task["id"], updated["id"])
             self.assertEqual("已完成", updated["status"])
+            self.assertEqual("已完成", updated["source_status"])
             self.assertIsNotNone(updated["completed_at"])
             self.assertIsNone(updated["result_summary"])
 
@@ -629,16 +669,26 @@ class TaskStoreTests(unittest.TestCase):
             ):
                 result = sync_once(db_path, Path(tmpdir) / "provider.json")
 
-            self.assertEqual({"imported": 2, "updated": 2, "writeback_errors": 0}, result)
+            self.assertEqual({"imported": 2, "updated": 0, "writeback_errors": 0}, result)
             store = TaskStore(db_path)
             tasks = store.list_tasks_for_source("sheet-demo")
             self.assertEqual(2, len(tasks))
-            provider.update_status.assert_any_call("2", "未开始")
-            provider.update_status.assert_any_call("3", "未开始")
+            self.assertEqual("未开始", tasks[0]["source_status"])
+            self.assertEqual("未开始", tasks[1]["source_status"])
+            provider.update_status.assert_not_called()
 
     def test_sync_once_continues_after_single_writeback_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "tasks.db"
+            store = TaskStore(db_path)
+            first = store.upsert_external_task("sheet-demo", "2", "task a", "detail a", "未开始")
+            second = store.upsert_external_task("sheet-demo", "3", "task b", "detail b", "未开始")
+            claimed_first = store.claim_next_task("worker-a", lease_seconds=60)
+            self.assertEqual(first["id"], claimed_first["id"])
+            claimed_second = store.claim_next_task("worker-b", lease_seconds=60)
+            self.assertEqual(second["id"], claimed_second["id"])
+            store.complete_task(int(first["id"]), "worker-a", "done a")
+            store.complete_task(int(second["id"]), "worker-b", "done b")
 
             provider = mock.Mock()
             provider.name = "sheet-demo"
@@ -657,6 +707,34 @@ class TaskStoreTests(unittest.TestCase):
 
             self.assertEqual({"imported": 2, "updated": 1, "writeback_errors": 1}, result)
             self.assertEqual(2, provider.update_status.call_count)
+
+    def test_sync_once_does_not_requeue_completed_task_when_source_still_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "tasks.db"
+            store = TaskStore(db_path)
+            task = store.upsert_external_task("sheet-demo", "2", "task a", "detail a", "未开始")
+            claimed = store.claim_next_task("worker-a", lease_seconds=60)
+            self.assertEqual(task["id"], claimed["id"])
+            store.complete_task(int(task["id"]), "worker-a", "done")
+
+            provider = mock.Mock()
+            provider.name = "sheet-demo"
+            provider.can_write = True
+            provider.list_tasks.return_value = [
+                SourceTask(source_task_key="2", title="task a", detail="detail a", status="未开始"),
+            ]
+
+            with mock.patch("codex_orchestrator.sync_service.load_provider_config"), mock.patch(
+                "codex_orchestrator.sync_service.create_provider",
+                return_value=provider,
+            ):
+                result = sync_once(db_path, Path(tmpdir) / "provider.json")
+
+            self.assertEqual({"imported": 1, "updated": 1, "writeback_errors": 0}, result)
+            current = TaskStore(db_path).get_task(int(task["id"]))
+            self.assertEqual("已完成", current["status"])
+            self.assertEqual("未开始", current["source_status"])
+            provider.update_status.assert_called_once_with("2", "已完成")
 
     def test_resolve_spreadsheet_id_from_share_url(self) -> None:
         spreadsheet_id = _resolve_spreadsheet_id(

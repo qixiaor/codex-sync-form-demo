@@ -35,6 +35,8 @@ def _sync_with_provider(store: TaskStore, provider: SyncProvider) -> dict[str, i
 
     if provider.can_write:
         for task in store.list_tasks_for_source(provider.name):
+            if str(task.get("source_status") or "") == str(task["status"]):
+                continue
             try:
                 provider.update_status(str(task["source_task_key"]), str(task["status"]))
                 updated += 1

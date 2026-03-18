@@ -154,6 +154,7 @@ class TaskStore:
                     source_name VARCHAR(255) NULL,
                     source_task_key VARCHAR(255) NULL,
                     source_updated_at VARCHAR(64) NULL,
+                    source_status VARCHAR(16) NULL,
                     INDEX idx_tasks_status (status),
                     UNIQUE KEY idx_tasks_source (source_name, source_task_key)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -168,10 +169,13 @@ class TaskStore:
             "source_name": "TEXT" if self.dialect == "sqlite" else "VARCHAR(255) NULL",
             "source_task_key": "TEXT" if self.dialect == "sqlite" else "VARCHAR(255) NULL",
             "source_updated_at": "TEXT" if self.dialect == "sqlite" else "VARCHAR(64) NULL",
+            "source_status": "TEXT" if self.dialect == "sqlite" else "VARCHAR(16) NULL",
         }
         for name, column_type in missing_columns.items():
             if name not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {column_type}")
+        if "source_status" in self._task_columns(conn):
+            conn.execute("UPDATE tasks SET source_status = status WHERE source_status IS NULL")
 
     def _ensure_mysql_indexes(self, conn: _DBConnection) -> None:
         if self.dialect != "mysql":
@@ -242,24 +246,28 @@ class TaskStore:
                             source_name,
                             source_task_key,
                             source_updated_at,
+                            source_status,
                             created_at,
                             updated_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (title, detail, status, source_name, source_task_key, now, now, now),
+                        (title, detail, status, source_name, source_task_key, now, status, now, now),
                     )
                     task_id = int(cursor.lastrowid)
                 else:
+                    previous_source_status = row["source_status"] if "source_status" in row.keys() else row["status"]
+                    source_status_changed = previous_source_status != status
                     update_fields: list[str] = [
                         "title = ?",
                         "detail = ?",
                         "source_updated_at = ?",
+                        "source_status = ?",
                         "updated_at = ?",
                     ]
-                    update_values: list[Any] = [title, detail, now, now]
+                    update_values: list[Any] = [title, detail, now, status, now]
 
-                    if row["status"] != STATUS_RUNNING and status != row["status"]:
+                    if row["status"] != STATUS_RUNNING and source_status_changed and status != row["status"]:
                         if status == STATUS_PENDING:
                             update_fields.extend(
                                 [
@@ -522,6 +530,7 @@ class TaskStore:
             "source_name": row["source_name"] if "source_name" in keys else None,
             "source_task_key": row["source_task_key"] if "source_task_key" in keys else None,
             "source_updated_at": row["source_updated_at"] if "source_updated_at" in keys else None,
+            "source_status": row["source_status"] if "source_status" in keys else None,
             "claimed_by": row["claimed_by"],
             "lease_expires_at": row["lease_expires_at"],
             "attempt_count": row["attempt_count"],
