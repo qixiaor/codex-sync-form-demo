@@ -42,57 +42,6 @@
 
 并发控制只在 MySQL 里做。在线表格不负责抢任务。
 
-## MCP 接入思路
-
-MCP 在这个项目里不是交给每个 worker 去“自主探索”的。
-
-当前设计是：
-
-- 由代码里的 provider 主动调用 MCP
-- worker 只执行 MySQL 里已经领取到的任务
-- 不让每个智能体自己决定该调用 MCP 里的哪个 tool
-
-可以把它理解成“代码调用一个外部能力服务”，而不是“把 MCP 当作开放工具箱直接交给 agent”。
-
-流程图：
-
-```text
-在线表格
-   ^
-   |  MCP tool call
-   v
-DingTalkBaseProvider / GoogleSheetsProvider
-   ^
-   |  provider.list_tasks() / provider.update_status()
-   v
-sync loop
-   ^
-   |  upsert / writeback
-   v
-MySQL / 本地任务服务
-   ^
-   |  claim / complete / release
-   v
-worker pool
-   ^
-   |  execute task
-   v
-agent CLI
-```
-
-这样设计的原因：
-
-- 工具名、参数结构、状态映射都写死在 provider 里，行为更稳定
-- 多个 worker 不会同时直接操作在线表格，避免并发冲突
-- 不依赖不同模型自己判断该调哪个 MCP 工具，减少不确定性
-
-对钉钉多维表格来说，当前 provider 内部默认就是：
-
-- 读取任务：`search_base_record`
-- 回写状态：`update_records`
-
-worker 不需要知道这些工具细节。
-
 ## 一键启动
 
 **推荐优先使用统一配置文件 + 单命令启动，而不是手工维护 3 条命令**
@@ -122,14 +71,6 @@ worker 不需要知道这些工具细节。
 
 ```powershell
 python -m codex_orchestrator stack run --config .\examples\stack.dingtalk-base.json
-```
-
-`stack run` 会统一接管 `serve` / `sync` / `pool` 的输出并加上前缀，减少多进程同时写控制台时的日志串行问题。
-
-如果你想先检查最终会执行哪些命令：
-
-```powershell
-python -m codex_orchestrator stack print --config .\examples\stack.dingtalk-base.json
 ```
 
 ## 分步启动
@@ -531,3 +472,56 @@ worker / pool 现在支持两套参数：
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+## MCP 接入思路
+
+MCP 在这个项目里不是交给每个 worker 去“自主探索”的。
+
+当前设计是：
+
+- 由代码里的 provider 主动调用 MCP
+- worker 只执行 MySQL 里已经领取到的任务
+- 不让每个智能体自己决定该调用 MCP 里的哪个 tool
+
+可以把它理解成“代码调用一个外部能力服务”，而不是“把 MCP 当作开放工具箱直接交给 agent”。
+
+流程图：
+
+```text
+在线表格
+   ^
+   |  MCP tool call
+   v
+DingTalkBaseProvider / GoogleSheetsProvider
+   ^
+   |  provider.list_tasks() / provider.update_status()
+   v
+sync loop
+   ^
+   |  upsert / writeback
+   v
+MySQL / 本地任务服务
+   ^
+   |  claim / complete / release
+   v
+worker pool
+   ^
+   |  execute task
+   v
+agent CLI
+```
+
+这样设计的原因：
+
+- 工具名、参数结构、状态映射都写死在 provider 里，行为更稳定
+- 多个 worker 不会同时直接操作在线表格，避免并发冲突
+- 不依赖不同模型自己判断该调哪个 MCP 工具，减少不确定性
+
+对钉钉多维表格来说，当前 provider 内部默认就是：
+
+- 读取任务：`search_base_record`
+- 回写状态：`update_records`
+
+worker 不需要知道这些工具细节。
+
+
