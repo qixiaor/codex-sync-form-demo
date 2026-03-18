@@ -8,9 +8,9 @@
 
 任务表固定读取三列：
 
-| A列 | B列 | C列 |
-| --- | --- | --- |
-| 标题 | 任务详情 | 状态 |
+| A列  | B列   | C列  |
+| --- | ---- | --- |
+| 标题  | 任务详情 | 状态  |
 
 状态统一使用：
 
@@ -93,9 +93,9 @@ agent CLI
 
 worker 不需要知道这些工具细节。
 
-## 推荐启动
+## 一键启动
 
-推荐优先使用统一配置文件 + 单命令启动，而不是手工维护 3 条命令。
+**推荐优先使用统一配置文件 + 单命令启动，而不是手工维护 3 条命令**
 
 示例 MySQL URL：
 
@@ -106,6 +106,12 @@ worker 不需要知道这些工具细节。
 1. `python -m pip install pymysql`
 2. 先创建数据库，例如 `agent_tasks`
 3. 确认 `--db` 使用的是可连接的 MySQL URL
+
+钉钉表格获取`dentry_uuid`方法：
+
+1. 在钉钉中创建一个ai表格并复制分享链接，如：`https://alidocs.dingtalk.com/i/nodes/1DKw2zgV2PpdzzQ1SBzpZPGL8B5r9YAn?utm_scene=person_space&iframeQuery=viewId%3Dh6yiyob6r755cg7wfwexe%26sheetId%3D1h0j4aeec525eknxao7l7`
+
+2. 其中`dentry_uuid`为`1DKw2zgV2PpdzzQ1SBzpZPGL8B5r9YAn`这一段，复制到dingtalk-base.sync.json中即可
 
 统一启动配置示例：
 
@@ -203,7 +209,7 @@ python -m codex_orchestrator pool `
 - 程序不会在原项目目录原地执行，而是复制一份到任务 `workspace` 后再执行，避免多个 worker 并发互相污染。
 - 为减少 Claude 误读父目录项目的概率，worker 会在 `workspace` 写入根目录标记，并尝试初始化独立 `.git` 根。
 - 如果模板目录很大，建议至少加 `--workspace-cleanup always`，避免磁盘被历史 workspace 快速占满。
-- 如果你希望把改动写回主项目，再加 `--workspace-sync-back on-success`（只同步变更文件，不做整目录对拷）。
+- **如果你希望把改动写回主项目**，再加 `--workspace-sync-back on-success`（只同步变更文件，不做整目录对拷）。
 - 回写时会加文件锁，避免多个 worker 同时写主项目；若主项目文件在任务执行期间已被外部修改，该文件会标记冲突并跳过。
 
 另外，当前没有对外暴露 `--cwd` 参数；worker 内部会自动把每个任务子进程的 `cwd` 设为该任务 `workspace`。
@@ -241,23 +247,23 @@ python -m codex_orchestrator pool `
 
 常用字段：
 
-| 字段 | 说明 |
-| --- | --- |
-| `database_url` | MySQL URL，`serve` 和 `sync` 共用 |
-| `serve.host` | 本地 HTTP 服务监听地址 |
-| `serve.port` | 本地 HTTP 服务端口 |
-| `sync.config` | 同步源配置文件路径，支持相对 `stack.json` |
-| `sync.interval_seconds` | 同步轮询间隔 |
-| `sync.proxy_url` | 同步进程代理 |
-| `pool.workers` | worker 数量 |
-| `pool.template_dir` | 任务模板目录，支持相对 `stack.json` |
-| `pool.runtime_dir` | worker 运行目录，支持相对 `stack.json` |
-| `pool.agent_type` | `codex` 或 `command-template` |
-| `pool.agent_bin` | 智能体 CLI，例如 `codex.cmd`、`claude.cmd` |
-| `pool.agent_timeout_seconds` | 单任务超时 |
-| `pool.workspace_cleanup` | workspace 清理策略 |
-| `pool.workspace_sync_back` | 成功后是否回写主项目 |
-| `pool.proxy_url` | worker / agent 代理 |
+| 字段                           | 说明                                  |
+| ---------------------------- | ----------------------------------- |
+| `database_url`               | MySQL URL，`serve` 和 `sync` 共用       |
+| `serve.host`                 | 本地 HTTP 服务监听地址                      |
+| `serve.port`                 | 本地 HTTP 服务端口                        |
+| `sync.config`                | 同步源配置文件路径，支持相对 `stack.json`         |
+| `sync.interval_seconds`      | 同步轮询间隔                              |
+| `sync.proxy_url`             | 同步进程代理                              |
+| `pool.workers`               | worker 数量                           |
+| `pool.template_dir`          | 任务模板目录，支持相对 `stack.json`            |
+| `pool.runtime_dir`           | worker 运行目录，支持相对 `stack.json`       |
+| `pool.agent_type`            | `codex` 或 `command-template`        |
+| `pool.agent_bin`             | 智能体 CLI，例如 `codex.cmd`、`claude.cmd` |
+| `pool.agent_timeout_seconds` | 单任务超时                               |
+| `pool.workspace_cleanup`     | workspace 清理策略                      |
+| `pool.workspace_sync_back`   | 成功后是否回写主项目                          |
+| `pool.proxy_url`             | worker / agent 代理                   |
 
 相对路径都会按 `stack.json` 所在目录解析，不再要求你在固定 cwd 下启动。
 
@@ -294,18 +300,18 @@ python -m codex_orchestrator pool `
 
 参数含义：
 
-| 参数 | 是否必填 | 说明 |
-| --- | --- | --- |
-| `provider` | 是 | 固定写 `google-sheets` |
-| `name` | 是 | 这个同步源的名字，会写到本地数据库 `source_name` |
-| `spreadsheet_url` | 是 | Google Sheet 共享链接，程序会自动提取 `spreadsheet_id` |
-| `sheet_name` | 是 | 底部标签页名字，例如 `Sheet1` |
-| `header_row` | 否 | 表头所在行，默认 `1` |
-| `read_range` | 否 | 读取范围，默认 `'<sheet>'!A:C` |
-| `status_column` | 否 | 状态列，默认 `C` |
-| `service_account_file` | 是 | Google service account JSON 文件路径 |
-| `status_aliases` | 否 | 状态文案映射，例如把 `未完成` 归一化成 `未开始` |
-| `timeout_seconds` | 否 | 单次 HTTP 超时时间，默认 `30` |
+| 参数                     | 是否必填 | 说明                                         |
+| ---------------------- | ---- | ------------------------------------------ |
+| `provider`             | 是    | 固定写 `google-sheets`                        |
+| `name`                 | 是    | 这个同步源的名字，会写到本地数据库 `source_name`            |
+| `spreadsheet_url`      | 是    | Google Sheet 共享链接，程序会自动提取 `spreadsheet_id` |
+| `sheet_name`           | 是    | 底部标签页名字，例如 `Sheet1`                        |
+| `header_row`           | 否    | 表头所在行，默认 `1`                               |
+| `read_range`           | 否    | 读取范围，默认 `'<sheet>'!A:C`                    |
+| `status_column`        | 否    | 状态列，默认 `C`                                 |
+| `service_account_file` | 是    | Google service account JSON 文件路径           |
+| `status_aliases`       | 否    | 状态文案映射，例如把 `未完成` 归一化成 `未开始`                |
+| `timeout_seconds`      | 否    | 单次 HTTP 超时时间，默认 `30`                       |
 
 使用前需要：
 
@@ -338,19 +344,19 @@ python -m codex_orchestrator pool `
 
 参数含义：
 
-| 参数 | 是否必填 | 说明 |
-| --- | --- | --- |
-| `provider` | 是 | 固定写 `dingtalk-base` |
-| `name` | 是 | 这个同步源的名字，会写到本地数据库 `source_name` |
-| `mcp_url` | 是 | 钉钉 AI 表格 MCP 地址 |
-| `dentry_uuid` | 是 | 多维表格文档 ID |
-| `sheet_id_or_name` | 是 | 数据表 ID 或名字，通常是 `Sheet1` |
-| `title_field` | 否 | 标题字段名，默认 `标题` |
-| `detail_field` | 否 | 任务详情字段名，默认 `任务详情` |
-| `status_field` | 否 | 状态字段名，默认 `状态` |
-| `status_aliases` | 否 | 状态文案映射，例如把 `未完成` 归一化成 `未开始` |
-| `write_enabled` | 否 | 是否回写在线状态；只想验证读取时可设为 `false` |
-| `timeout_seconds` | 否 | 单次 MCP 调用超时时间，默认 `30` |
+| 参数                 | 是否必填 | 说明                              |
+| ------------------ | ---- | ------------------------------- |
+| `provider`         | 是    | 固定写 `dingtalk-base`             |
+| `name`             | 是    | 这个同步源的名字，会写到本地数据库 `source_name` |
+| `mcp_url`          | 是    | 钉钉 AI 表格 MCP 地址                 |
+| `dentry_uuid`      | 是    | 多维表格文档 ID                       |
+| `sheet_id_or_name` | 是    | 数据表 ID 或名字，通常是 `Sheet1`         |
+| `title_field`      | 否    | 标题字段名，默认 `标题`                   |
+| `detail_field`     | 否    | 任务详情字段名，默认 `任务详情`               |
+| `status_field`     | 否    | 状态字段名，默认 `状态`                   |
+| `status_aliases`   | 否    | 状态文案映射，例如把 `未完成` 归一化成 `未开始`     |
+| `write_enabled`    | 否    | 是否回写在线状态；只想验证读取时可设为 `false`     |
+| `timeout_seconds`  | 否    | 单次 MCP 调用超时时间，默认 `30`           |
 
 当前 provider 默认使用这些 MCP 工具：
 
@@ -507,18 +513,18 @@ worker / pool 现在支持两套参数：
 
 常用通用参数：
 
-| 参数 | 说明 |
-| --- | --- |
-| `--agent-type` | 执行模式，当前支持 `codex` 和 `command-template` |
-| `--agent-bin` | 智能体 CLI 可执行文件 |
-| `--agent-model` | 传给智能体 CLI 的模型名；只对支持模型参数的模板有意义 |
-| `--agent-timeout-seconds` | 单个任务最大执行时间 |
+| 参数                         | 说明                                                                                                                        |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `--agent-type`             | 执行模式，当前支持 `codex` 和 `command-template`                                                                                    |
+| `--agent-bin`              | 智能体 CLI 可执行文件                                                                                                             |
+| `--agent-model`            | 传给智能体 CLI 的模型名；只对支持模型参数的模板有意义                                                                                             |
+| `--agent-timeout-seconds`  | 单个任务最大执行时间                                                                                                                |
 | `--agent-command-template` | 自定义命令模板，支持 `{workspace_dir}`、`{prompt_path}`、`{final_message_path}`、`{prompt}`、`{model}`、`{title}`、`{detail}`、`{task_id}` |
-| `--agent-use-stdin` | 把任务提示词通过 stdin 传给 CLI |
-| `--agent-no-stdin` | 不走 stdin，由命令模板自己消费 `prompt_path` 或 `{prompt}` |
-| `--agent-arg` | 给智能体 CLI 追加额外参数，可重复传入 |
-| `--workspace-cleanup` | 任务结束后的 workspace 清理策略：`after-sync-back` / `on-success` / `always` / `never`，默认 `after-sync-back` |
-| `--workspace-sync-back` | 把 workspace 变更增量回写到 `--template-dir`：`on-success` / `never` / `always`，默认 `on-success` |
+| `--agent-use-stdin`        | 把任务提示词通过 stdin 传给 CLI                                                                                                     |
+| `--agent-no-stdin`         | 不走 stdin，由命令模板自己消费 `prompt_path` 或 `{prompt}`                                                                             |
+| `--agent-arg`              | 给智能体 CLI 追加额外参数，可重复传入                                                                                                     |
+| `--workspace-cleanup`      | 任务结束后的 workspace 清理策略：`after-sync-back` / `on-success` / `always` / `never`，默认 `after-sync-back`                          |
+| `--workspace-sync-back`    | 把 workspace 变更增量回写到 `--template-dir`：`on-success` / `never` / `always`，默认 `on-success`                                    |
 
 ## 测试
 
