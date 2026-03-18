@@ -19,6 +19,14 @@ from .client import TaskClient
 from .network import apply_proxy_to_env
 
 
+def _text_subprocess_kwargs() -> dict[str, object]:
+    return {
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+
+
 @dataclass
 class WorkerConfig:
     server_url: str
@@ -212,9 +220,9 @@ def prepare_workspace_for_agent(config: WorkerConfig, workspace_dir: Path) -> No
             ["git", "init"],
             cwd=str(workspace_dir),
             capture_output=True,
-            text=True,
             check=False,
             timeout=20,
+            **_text_subprocess_kwargs(),
         )
         if process.returncode == 0:
             print(f"[{config.worker_id}] initialized isolated git root in workspace: {workspace_dir}")
@@ -590,12 +598,12 @@ def run_agent(
     process = subprocess.run(
         command,
         input=prompt if config.agent_use_stdin else None,
-        text=True,
         capture_output=True,
         check=False,
         timeout=config.agent_timeout_seconds,
         env=env,
         cwd=str(workspace_dir),
+        **_text_subprocess_kwargs(),
     )
     stdout_path.write_text(process.stdout, encoding="utf-8")
     stderr_path.write_text(process.stderr, encoding="utf-8")

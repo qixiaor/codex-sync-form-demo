@@ -34,6 +34,7 @@ from codex_orchestrator.worker import (
     load_agent_command_template,
     prepare_workspace_for_agent,
     resolve_codex_launcher,
+    _text_subprocess_kwargs,
     should_sync_workspace_back,
     sync_workspace_to_template,
     should_cleanup_workspace,
@@ -1125,6 +1126,12 @@ class TaskStoreTests(unittest.TestCase):
         env = _build_child_env()
         self.assertEqual("1", env["PYTHONUNBUFFERED"])
         self.assertEqual("utf-8", env["PYTHONIOENCODING"])
+
+    def test_text_subprocess_kwargs_force_utf8_with_replacement(self) -> None:
+        kwargs = _text_subprocess_kwargs()
+        self.assertEqual(True, kwargs["text"])
+        self.assertEqual("utf-8", kwargs["encoding"])
+        self.assertEqual("replace", kwargs["errors"])
 
 
 if __name__ == "__main__":
